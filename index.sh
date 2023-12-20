@@ -16,7 +16,7 @@ main() {
   the_repo_localization
 
   echo "# 🚩 ② 安装基础工具："
-  apt install -y nano net-tools htop
+  apt install -y nano net-tools htop wget
 
   echo "# 🚩 ③ 直通设置："
   the_pass_through

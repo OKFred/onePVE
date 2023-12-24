@@ -8,11 +8,9 @@
 
 current_dir=$(pwd) # 获取当前工作目录的绝对路径
 current_folder=$(basename "$PWD")
-parent_dir=$(dirname "$current_dir")    # 获取当前工作目录的父目录路径
-parent_folder=$(basename "$parent_dir") # 获取父目录的名称
 
-backup_dir=$HOME/"$parent_folder"_backup
-backup_archive_dir=$HOME/"$parent_folder"_backup_archive
+backup_dir=$HOME/"$current_folder"_backup
+backup_archive_dir=$HOME/"$current_folder"_backup_archive
 
 the_backup_restore() {
   the_restore
@@ -27,7 +25,6 @@ the_restore() {
   local network_file="/etc/network/interfaces"
   local new_network_file="$backup_dir/interfaces"
   if [ "$(ls -A $backup_dir)" ]; then
-    ls -la $backup_dir
     read -p "是否还原网络配置和虚拟机配置文件？(y/n)" need_restore
     if [ $need_restore == "y" ]; then
       echo -e "\033[31m"

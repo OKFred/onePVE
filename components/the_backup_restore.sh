@@ -38,8 +38,9 @@ the_backup_restore() {
 
 the_backup() {
   local network_file="/etc/network/interfaces"
-  local nodes_folder="/etc/pve/qemu-server"
-  local nodes_backup_folder="$backup_dir/qemu-server"
+  local this_node_name=$(get_this_node_name)
+  local nodes_folder="/etc/pve/nodes/$this_node_name"
+  local nodes_backup_folder="$backup_dir"
   local network_backup_file="$backup_dir/interfaces"
   read -p "是否备份重要文件？(y/n)" need_backup
   if [ $need_backup == "y" ]; then
@@ -52,4 +53,14 @@ the_backup() {
   else
     echo -e "\033[33m 🚀取消备份"
   fi
+}
+
+get_this_node_name() {
+  local node_name=""
+  if [ -f /etc/hostname ]; then
+    node_name=$(cat /etc/hostname)
+  else
+    return 1
+  fi
+  echo "$node_name"
 }

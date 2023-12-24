@@ -34,6 +34,8 @@ the_restore() {
         return 1
       fi
       echo -e "\033[33m 🚀开始还原"
+      #先批量设置下权限777
+      chmod -R 777 $backup_dir
       cp $new_network_file $network_file
       cp -r $backup_dir/* $qemu_server_folder
       echo -e "\033[33m 🚀还原完成"

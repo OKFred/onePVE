@@ -8,5 +8,8 @@
 
 `cd $HOME/onePVE && chmod +x index.sh && ./index.sh`
 
+## 菜单化显示
+`cd $HOME/onePVE && chmod +x menu.sh && ./menu.sh`
+
 ### 附带三方pve_source，也挺好用
 `cd $HOME/onePVE && chmod +x pve_source && ./pve_source`

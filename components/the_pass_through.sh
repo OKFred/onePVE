@@ -9,6 +9,7 @@
 the_pass_through() {
   the_module_replace
   the_blacklist_replace
+  the_boot_configuration
 }
 
 the_module_replace() {
@@ -53,5 +54,18 @@ options vfio_iommu_type1 allow_unsafe_interrupts=1
 " >/etc/modprobe.d/pve-blacklist.conf
   else
     echo "备份文件已存在，跳过"
+  fi
+}
+
+the_boot_configuration() {
+  echo -e "\033[33m 🚀是否需要更新grub配置 & initramfs？(y/n)"
+  read need_config_boot
+  echo -e "\033[0m"
+  if [ "$need_config_boot" != "y" ]; then
+    echo "不需要，跳过..."
+  else
+    sed -i "s/\"quiet\"/\"quiet intel_iommu=on initcall_blacklist=sysfb_init\"/g" /etc/default/grub
+    update-grub
+    update-initramfs -u -k all
   fi
 }

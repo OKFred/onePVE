@@ -21,11 +21,6 @@ main() {
   echo "# 🚩 ③ 直通设置："
   the_pass_through
 
-  echo "# 🚩 ④ 更新grub配置 & initramfs："
-  sed -i "s/\"quiet\"/\"quiet intel_iommu=on initcall_blacklist=sysfb_init\"/g" /etc/default/grub
-  update-grub
-  update-initramfs -u -k all
-
   echo "# 🚩 ⑤ 禁用SWAP(可选)："
   echo -e "\033[33m 🚀SWAP disable--是否禁用SWAP？(y/n)"
   read disable_swap

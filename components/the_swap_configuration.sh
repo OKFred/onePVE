@@ -10,20 +10,20 @@ the_swap_configuration() {
   echo -e "\033[33m 🚀需要启用还是禁用内存交换空间(SWAP)？(y/n)"
   read need_use_swap
   echo -e "\033[0m"
-  local swap_file=/dev/pve/swap
-  the_file_backup $swap_file
+  local swap_config_file=/etc/fstab
+  the_file_backup $swap_config_file
   if [ "$need_use_swap" == "y" ]; then
     local search_regex=^#*\/dev
     local replace_regex=\/dev
     local flags='g'
-    local sed_command="s/$search_regex/$replace_regex/$flags"
-    sed -i "$sed_command" /etc/fstab #启用SWAP
+    local sed_command="'s/$search_regex/$replace_regex/$flags'"
+    sed "$sed_command" $swap_config_file #启用SWAP
   else
     local search_regex=^\/dev
     local replace_regex=#\/dev
     local flags='g'
-    local sed_command="s/$search_regex/$replace_regex/$flags"
-    sed -i "$sed_command" /etc/fstab #禁用SWAP
+    local sed_command="'s/$search_regex/$replace_regex/$flags'"
+    sed "$sed_command" $swap_config_file #禁用SWAP
   fi
 }
 

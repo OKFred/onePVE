@@ -50,7 +50,7 @@ main() {
     04 | 4) the_cluster_exit ;;
     05 | 5) the_swap_configuration ;;
     06 | 6) the_network_dhcp ;;
-    07 | 7) the_important_backup_restore ;;
+    07 | 7) the_backup_restore ;;
     08 | 8) echo '敬请期待' ;;
     09 | 9) nano readme.md ;;
     00 | 0) exit 1 ;;

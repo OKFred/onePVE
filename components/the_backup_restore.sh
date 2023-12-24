@@ -7,34 +7,30 @@
 # none
 backup_dir=$HOME/backup
 backup_archive_dir=$HOME/backup_archive
-backup_file=$backup_archive_dir/backup.tar.gz
 
 the_backup_restore() {
-  if [ -f $backup_file ]; then
-    echo -e "\033[33m 🚀找到备份文件，是否还原？(y/n)"
-    read need_restore
-    #先解压
-    #然后二次确认
+  the_restore
+  the_backup
+}
+
+the_restore(){
+  #判断backup_dir是否非空，非空则询问是否还原
+  if [ "$(ls -A $backup_dir)" ]; then
+    read -p "是否还原重要文件？(y/n)" need_restore
     if [ $need_restore == "y" ]; then
-      tar -zxvf $backup_file -C $backup_dir
-      echo -e "\033[33m 🚀解压完成"
-      ls -al $backup_dir
-      echo -e "\033[33m 🚀请确认是否还原？(y/n)"
-      read need_restore_confirmation
-      if [ $need_restore_confirmation == "y" ]; then
-        echo -e "\033[33m 🚀开始还原"
-        echo -e "\033[33m 🚀还原完成"
-      else
-        echo -e "\033[33m 🚀取消还原"
-      fi
+      echo -e "\033[33m 🚀开始还原"
+      local this_node_name=$(get_this_node_name)
+      local qemu_server_folder="/etc/pve/nodes/$this_node_name/qemu-server/"
+      local new_network_file="$backup_dir/interfaces"
+      cp $new_network_file /root/test/interfaces
+      cp -r $backup_dir/* /root/test/
+      echo -e "\033[33m 🚀还原完成"
     else
       echo -e "\033[33m 🚀取消还原"
     fi
   else
-    echo "备份文件不存在"
+    echo -e "\033[33m 🚀备份文件夹为空，无法还原"
   fi
-  echo -e "\033[0m"
-  the_backup
 }
 
 the_backup() {
@@ -49,11 +45,13 @@ the_backup() {
     mkdir -p $backup_archive_dir
     cp $network_file $new_network_file
     cp -r $qemu_server_folder $backup_dir
+    local backup_file="$backup_archive_dir/$this_node_name-$(date +%Y%m%d%H%M%S).tar.gz"
     tar -zcvf $backup_file $backup_dir
     echo -e "\033[33m 🚀备份完成"
   else
     echo -e "\033[33m 🚀取消备份"
   fi
+  echo -e "\033[0m"
 }
 
 get_this_node_name() {

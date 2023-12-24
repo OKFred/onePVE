@@ -6,7 +6,7 @@
 #dependencies--文件依赖
 # none
 backup_dir=$HOME/backup
-backup_file=$backup_dir/backup.tar.gz
+backup_file=$HOME/backup.tar.gz
 
 the_backup_restore() {
   if [ -f $backup_file ]; then
@@ -39,8 +39,8 @@ the_backup_restore() {
 the_backup() {
   local network_file="/etc/network/interfaces"
   local this_node_name=$(get_this_node_name)
-  local nodes_folder="/etc/pve/nodes/$this_node_name"
-  local nodes_backup_folder="$backup_dir"
+  local nodes_folder="/etc/pve/nodes/$this_node_name/qemu-server/"
+  local nodes_backup_folder="$backup_dir/qemu-server"
   local network_backup_file="$backup_dir/interfaces"
   read -p "是否备份重要文件？(y/n)" need_backup
   if [ $need_backup == "y" ]; then

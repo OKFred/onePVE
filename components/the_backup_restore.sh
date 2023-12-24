@@ -6,7 +6,8 @@
 #dependencies--文件依赖
 # none
 backup_dir=$HOME/backup
-backup_file=$HOME/backup_archive/backup.tar.gz
+backup_archive_dir=$HOME/backup_archive
+backup_file=$backup_archive_dir/backup.tar.gz
 
 the_backup_restore() {
   if [ -f $backup_file ]; then
@@ -45,6 +46,7 @@ the_backup() {
   if [ $need_backup == "y" ]; then
     echo -e "\033[33m 🚀开始备份"
     mkdir -p $backup_dir
+    mkdir -p $backup_archive_dir
     cp $network_file $new_network_file
     cp -r $qemu_server_folder $backup_dir
     tar -zcvf $backup_file $backup_dir

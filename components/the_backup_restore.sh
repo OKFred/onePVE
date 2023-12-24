@@ -24,6 +24,7 @@ the_restore() {
   local qemu_server_folder="/etc/pve/nodes/$this_node_name/qemu-server/"
   local network_file="/etc/network/interfaces"
   local new_network_file="$backup_dir/interfaces"
+  local new_qemu_server_folder="$backup_dir/qemu-server/"
   if [ "$(ls -A $backup_dir)" ]; then
     read -p "是否还原网络配置和虚拟机配置文件？(y/n)" need_restore
     if [ $need_restore == "y" ]; then
@@ -37,7 +38,7 @@ the_restore() {
       #先批量设置下权限777
       chmod -R 777 $backup_dir
       cp $new_network_file $network_file
-      cp -r $backup_dir/* $qemu_server_folder
+      cp -r $new_qemu_server_folder/* $qemu_server_folder
       echo -e "\033[33m 🚀还原完成"
     else
       echo -e "\033[33m 🚀取消还原"

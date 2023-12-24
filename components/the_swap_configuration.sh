@@ -17,15 +17,13 @@ the_swap_configuration() {
     local replace_regex='\/dev'
     local flags='g'
     local sed_command="/$search_regex/$replace_regex/$flags"
-    echo $sed_command
-    sed "s"$sed_command $swap_config_file #启用SWAP
+    sed -i "s"$sed_command $swap_config_file #启用SWAP
   else
     local search_regex='^\/dev'
     local replace_regex='#\/dev'
     local flags='g'
     local sed_command="/$search_regex/$replace_regex/$flags"
-    echo $sed_command
-    sed "s"$sed_command $swap_config_file #禁用SWAP
+    sed -i "s"$sed_command $swap_config_file #禁用SWAP
   fi
 }
 

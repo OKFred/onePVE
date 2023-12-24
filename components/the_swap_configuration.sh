@@ -13,18 +13,20 @@ the_swap_configuration() {
   local swap_config_file=/etc/fstab
   the_file_backup $swap_config_file
   if [ "$need_use_swap" == "y" ]; then
-    local search_regex='^#*\/dev'
-    local replace_regex='\/dev'
+    local search_regex='^#*\/dev\/pve\/swap'
+    local replace_regex='\/dev\/pve\/swap'
     local flags='g'
     local sed_command="/$search_regex/$replace_regex/$flags"
     sed -i "s"$sed_command $swap_config_file #启用SWAP
   else
-    local search_regex='^\/dev'
-    local replace_regex='#\/dev'
+    local search_regex='^\/dev\/pve\/swap'
+    local replace_regex='#\/dev\/pve\/swap'
     local flags='g'
     local sed_command="/$search_regex/$replace_regex/$flags"
     sed -i "s"$sed_command $swap_config_file #禁用SWAP
   fi
+  echo "SWAP配置完成"
+  cat $swap_config_file | grep -E '\/dev\/pve\/swap'
 }
 
 the_file_backup() {

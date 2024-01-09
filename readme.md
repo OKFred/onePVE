@@ -3,6 +3,7 @@
 ### @author: Fred Zhang Qi
 
 ### @datetime: 2023-12-17
+### 仅适配Intel CPU，请注意区别
 
 ## 运行方法
 

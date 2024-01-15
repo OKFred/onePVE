@@ -27,10 +27,10 @@ the_restore() {
   local new_qemu_server_folder="$backup_dir/qemu-server/"
   if [ "$(ls -A $backup_dir)" ]; then
     read -p "是否还原网络配置和虚拟机配置文件？(y/n)" need_restore
-    if [ $need_restore == "y" ]; then
+    if [ "$need_restore" == "y" ]; then
       echo -e "\033[31m"
       read -p "将覆盖$network_file 和 $qemu_server_folder 下的所有文件，是否继续？(y/n)" need_restore
-      if [ $need_restore != "y" ]; then
+      if [ "$need_restore" != "y" ]; then
         echo -e "\033[31m 🚀取消还原"
         return 1
       fi

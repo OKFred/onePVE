@@ -64,7 +64,9 @@ the_sources_backup() {
 the_subscription_replace() {
   sources_list="/etc/apt/sources.list.d/pve-no-subscription.list"
   backup_file="$sources_list.bak"
-
+  if [! -f $sources_list]; then
+    echo "未找到pve-no-subscription.list文件，跳过"
+  fi
   if [ ! -f "$backup_file" ]; then
     mv $sources_list $backup_file
     echo "已备份原有pve-no-subscription.list -> pve-no-subscription.list.bak"

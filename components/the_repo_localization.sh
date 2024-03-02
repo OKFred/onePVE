@@ -54,6 +54,7 @@ the_sources_backup() {
   backup_file="$sources_list.bak"
 
   if [ ! -f "$backup_file" ]; then
+    touch $backup_file
     mv $sources_list $backup_file
     echo "已备份原有sources.list -> sources.list.bak"
   else
@@ -68,6 +69,7 @@ the_subscription_replace() {
     echo "未找到pve-no-subscription.list文件，跳过"
   fi
   if [ ! -f "$backup_file" ]; then
+    touch $backup_file
     mv $sources_list $backup_file
     echo "已备份原有pve-no-subscription.list -> pve-no-subscription.list.bak"
     echo "# 更换国内源
@@ -83,6 +85,7 @@ the_enterprise_replace() {
   backup_file="$sources_list.bak"
 
   if [ ! -f "$backup_file" ]; then
+    touch $backup_file
     mv $sources_list $backup_file
     echo "已备份原有pve-enterprise.list -> pve-enterprise.list.bak"
     echo "### 注释付费订阅" >$sources_list
@@ -96,6 +99,7 @@ the_ceph_replace() {
   backup_file="$sources_list.bak"
 
   if [ ! -f "$backup_file" ]; then
+    touch $backup_file
     mv $sources_list $backup_file
     echo "已备份原有ceph.list -> ceph.list.bak"
     echo "### 注释付费订阅" >$sources_list

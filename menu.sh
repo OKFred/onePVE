@@ -14,9 +14,8 @@ source ./components/the_network_dhcp.sh
 source ./components/the_backup_restore.sh
 
 menu_title() {
-  #clear
   date
-  echo "执行需要管理员权限。请注意Root Required"
+  echo "Root Required--执行需要管理员权限。请注意"
   echo "*********************"
   echo "*****   工具箱Tool   *****"
 }
@@ -25,6 +24,7 @@ menu_back() {
   echo
   echo -n "press any key--按任意键返回."
   read
+  clear
 }
 
 main() {

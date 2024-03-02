@@ -53,7 +53,7 @@ main() {
     07 | 7) the_backup_restore ;;
     08 | 8) echo 'wait and see--敬请期待' ;;
     09 | 9) nano readme.md ;;
-    00 | 0) exit 1 ;;
+    00 | 0 | "") exit 1 ;;
     u) echo "???" ;;
     *) echo "error input--输入有误，请重新输入！" && menu_back ;;
     esac

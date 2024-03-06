@@ -7,11 +7,9 @@
 
 ## 运行方法
 
-`cd $HOME/onePVE && chmod +x index.sh && ./index.sh`
+`cd $HOME && git clone https://github.com/OKFred/onePVE`
 
-## 菜单化显示
-
-`cd $HOME/onePVE && chmod +x menu.sh && ./menu.sh`
+`cd $HOME/onePVE && git reset --hard HEAD && git pull && chmod +x menu.sh && ./menu.sh`
 
 ### 附带三方 pve_source，也挺好用
 

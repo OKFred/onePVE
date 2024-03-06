@@ -21,15 +21,17 @@ the_restore() {
   #判断backup_dir是否非空，非空则询问是否还原
   echo -e "\033[33m"
   local this_node_name=$(get_this_node_name)
+  local lxc_folder="/etc/pve/nodes/$this_node_name/lxc/"
   local qemu_server_folder="/etc/pve/nodes/$this_node_name/qemu-server/"
   local network_file="/etc/network/interfaces"
   local new_network_file="$backup_dir/interfaces"
+  local new_lxc_folder="$backup_dir/lxc/"
   local new_qemu_server_folder="$backup_dir/qemu-server/"
   if [ "$(ls -A $backup_dir)" ]; then
     read -p "是否还原网络配置和虚拟机配置文件？(y/n)" need_restore
     if [ "$need_restore" == "y" ]; then
       echo -e "\033[31m"
-      read -p "将覆盖$network_file 和 $qemu_server_folder 下的所有文件，是否继续？(y/n)" need_restore
+      read -p "将覆盖$network_file 、$lxc_folder 和 $qemu_server_folder 下的所有文件，是否继续？(y/n)" need_restore
       if [ "$need_restore" != "y" ]; then
         echo -e "\033[31m 🚀取消还原"
         return 1
@@ -38,6 +40,7 @@ the_restore() {
       #先批量设置下权限777
       chmod -R 777 $backup_dir
       cp $new_network_file $network_file
+      cp -r $new_lxc_folder/* $lxc_folder
       cp -r $new_qemu_server_folder/* $qemu_server_folder
       echo -e "\033[33m 🚀还原完成"
     else
@@ -50,6 +53,7 @@ the_restore() {
 
 the_backup() {
   local this_node_name=$(get_this_node_name)
+  local lxc_folder="/etc/pve/nodes/$this_node_name/lxc/"
   local qemu_server_folder="/etc/pve/nodes/$this_node_name/qemu-server/"
   local network_file="/etc/network/interfaces"
   local new_network_file="$backup_dir/interfaces"
@@ -59,6 +63,7 @@ the_backup() {
     mkdir -p $backup_dir
     mkdir -p $backup_archive_dir
     cp $network_file $new_network_file
+    cp -r $lxc_folder $backup_dir
     cp -r $qemu_server_folder $backup_dir
     local backup_file="$backup_archive_dir/$this_node_name-$(date +%Y%m%d).tar.gz"
     tar -zcvf $backup_file $backup_dir

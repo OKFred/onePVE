@@ -40,8 +40,8 @@ the_restore() {
       #先批量设置下权限777
       chmod -R 777 $backup_dir
       cp $new_network_file $network_file
-      cp -r $new_lxc_folder/* $lxc_folder
-      cp -r $new_qemu_server_folder/* $qemu_server_folder
+      cp -r $new_lxc_folder* $lxc_folder
+      cp -r $new_qemu_server_folder* $qemu_server_folder
       echo -e "\033[33m 🚀还原完成"
     else
       echo -e "\033[33m 🚀取消还原"

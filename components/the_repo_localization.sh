@@ -121,10 +121,10 @@ the_ubuntu_repo() {
 
 the_debian_repo() {
   echo "# 更换国内源
-	deb https://mirrors.ustc.edu.cn/debian/ $my_code_name main contrib
-	deb-src https://mirrors.ustc.edu.cn/debian/ $my_code_name main contrib
-	deb https://mirrors.ustc.edu.cn/debian/ $my_code_name-updates main contrib
-	deb-src https://mirrors.ustc.edu.cn/debian/ $my_code_name-updates main contrib
+	deb https://mirrors.ustc.edu.cn/debian/ $my_code_name main non-free non-free-firmware contrib
+	deb-src https://mirrors.ustc.edu.cn/debian/ $my_code_name main non-free non-free-firmware contrib
+	deb https://mirrors.ustc.edu.cn/debian/ $my_code_name-updates main non-free non-free-firmware contrib
+	deb-src https://mirrors.ustc.edu.cn/debian/ $my_code_name-updates main non-free non-free-firmware contrib
 	" >/etc/apt/sources.list
   echo "updating--开始更新源..."
   apt update && apt upgrade -y

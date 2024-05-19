@@ -55,28 +55,6 @@ options vfio_iommu_type1 allow_unsafe_interrupts=1
   else
     echo "备份文件已存在，跳过"
   fi
-  #判断是否存在nvidia显卡
-  if [ -n "$(lspci | grep -i nvidia)" ]; then
-    echo "检测到nvidia显卡，添加额外配置"
-    apt install pve-headers -y #后续安装nvidia-driver需要用到
-    the_extra_modprobe
-    the_nvidia_rules
-  fi
-}
-
-the_extra_modprobe() {
-  echo "nvidia-drm
-nvidia
-nvidia_uvm" >/etc/modules-load.d/nvidia.conf
-  echo "blacklist nouveau" >/etc/modprobe.d/nvidia-blacklists-nouveau.conf
-}
-
-the_nvidia_rules() {
-  echo -e "# 当Nvidia模块加载时，创建/dev/nvidia0、/dev/nvidia1等设备文件和/dev/nvidiactl\n
-  KERNEL==\"nvidia\", RUN+=\"/bin/bash -c 'nvidia-smi -L; chmod 666 /dev/nvidia*'\"\n
-  \n
-  # 当nvidia_uvm CUDA模块加载时，创建CUDA节点\n
-  KERNEL==\"nvidia_uvm\", RUN+=\"/bin/bash -c 'nvidia-modprobe -c0 -u; chmod 0666 /dev/nvidia-uvm*'\"" >/etc/udev/rules.d/70-nvidia.rules
 }
 
 the_boot_configuration() {

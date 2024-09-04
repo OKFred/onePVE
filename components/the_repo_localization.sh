@@ -23,6 +23,7 @@ the_repo_localization() {
   the_subscription_replace
   the_ceph_replace
   the_enterprise_replace
+  the_lxc_replace
 
   echo -e "\033[32m"
   # 使用返回的系统信息
@@ -104,6 +105,12 @@ the_ceph_replace() {
   else
     echo "skip--备份文件已存在，跳过"
   fi
+}
+
+the_lxc_replace(){
+  cp /usr/share/perl5/PVE/APLInfo.pm /usr/share/perl5/PVE/APLInfo.pm_back
+  sed -i 's|http://download.proxmox.com|https://mirrors.ustc.edu.cn/proxmox|g' /usr/share/perl5/PVE/APLInfo.pm
+  systemctl restart pvedaemon.service
 }
 
 the_ubuntu_repo() {

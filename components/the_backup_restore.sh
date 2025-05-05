@@ -60,6 +60,10 @@ the_backup() {
   read -p "是否备份网络配置和虚拟机配置文件？(y/n)" need_backup
   if [ "$need_backup" == "y" ]; then
     echo -e "\033[33m 🚀开始备份"
+    # 如果原本就有备份文件夹，则删除
+    if [ -d "$backup_dir" ]; then
+      rm -rf $backup_dir
+    fi
     mkdir -p $backup_dir
     mkdir -p $backup_archive_dir
     cp $network_file $new_network_file

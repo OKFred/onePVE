@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Agent browser acceptance</title>
+<style>
+  :root { font-family: system-ui,sans-serif; color: #173244; background: #edf3f6; }
+  body { max-width: 760px; margin: 48px auto; padding: 24px; }
+  main { padding: 32px; background: white; border-radius: 16px; box-shadow: 0 8px 40px #17324412; }
+  h1 { margin-top: 0; } label { display: block; margin: 20px 0 8px; font-weight: 600; }
+  input,textarea,button { font: inherit; } input,textarea { box-sizing: border-box; width: 100%; padding: 12px; border: 1px solid #9caeb9; border-radius: 6px; }
+  button { padding: 10px 18px; border: 0; border-radius: 6px; background: #145e80; color: white; cursor: pointer; margin: 16px 8px 0 0; }
+  output { display: block; padding: 12px; margin-top: 16px; background: #edf3f6; } small { color: #496575; }
+</style>
+<main>
+  <h1>Agent browser acceptance</h1>
+  <p>这是真实工作桌面中的同一个浏览器。用它验证输入、人工接管和页面保留。</p>
+  <label for="name">姓名 / Name</label><input id="name" autocomplete="off" placeholder="中英文输入测试">
+  <label for="draft">未提交草稿 / Unsaved draft</label><textarea id="draft" rows="5" placeholder="输入后暂停 MCP、刷新 noVNC；草稿应保持原样。"></textarea>
+  <small>草稿只保存在当前页面内存中，用来验证同一页面没有被重建。</small>
+  <div><button id="increment">Increment</button><button id="save">Save login marker</button><button id="clear">Clear marker</button></div>
+  <output id="result" aria-live="polite">Count: 0</output>
+  <output id="marker" aria-live="polite"></output>
+  <p><a href="/acceptance-download.txt">Download acceptance file</a></p>
+  <p id="session"></p>
+  <div style="display:flex;gap:12px"><canvas id="webgl" width="240" height="100"></canvas><canvas id="webgl2" width="240" height="100"></canvas></div>
+  <pre id="gpu-result">GPU proof not requested</pre>
+</main>
+<script>
+  let count = 0;
+  const pageIdentity = crypto.randomUUID();
+  document.querySelector('#session').textContent = 'Page identity: ' + pageIdentity;
+  const refreshMarker = () => document.querySelector('#marker').textContent = 'Persistent marker: ' + (localStorage.getItem('agent-acceptance-login') || 'unset');
+  document.querySelector('#increment').onclick = () => document.querySelector('#result').textContent = 'Count: ' + (++count);
+  document.querySelector('#save').onclick = () => { localStorage.setItem('agent-acceptance-login', document.querySelector('#name').value || 'accepted'); document.cookie='onepve-session-probe=accepted; Path=/; SameSite=Lax'; refreshMarker(); };
+  document.querySelector('#clear').onclick = () => { localStorage.removeItem('agent-acceptance-login'); refreshMarker(); };
+  refreshMarker();
+</script>
+<script src="/gpu.js"></script>
+</html>

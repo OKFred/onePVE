@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=接管浏览器
+Comment=Stop MCP control while keeping the current browser open
+Exec=/opt/onepve-agent/bin/agent-takeover
+Icon=input-mouse
+Terminal=false
+Categories=Utility;

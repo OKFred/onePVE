@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -euo pipefail
+source /opt/onepve-agent/bin/common.sh
+if /opt/onepve-agent/bin/agent-mode-is wayland; then
+  exec /usr/bin/python3 /opt/onepve-agent/share/wayland-session.py exec -- \
+    /usr/bin/python3 /opt/onepve-agent/share/run-wayvnc.py
+fi
+require_x11
+exec /usr/bin/x0tigervncserver -fg -display "$DISPLAY" -rfbport 5900 \
+  -localhost yes -SecurityTypes None -AlwaysShared -AcceptSetDesktopSize=0

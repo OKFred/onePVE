@@ -1,0 +1,32 @@
+#!/usr/bin/env python3
+"""CLI shared by the PVE menus; importing it never applies configuration."""
+import json
+from pathlib import Path
+import subprocess
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parent / 'lib'))
+
+
+def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if not argv or argv[0] in {'-h', '--help'}:
+        print('Usage: onepve.py {gpu|agent} ACTION [options]\n'
+              '  gpu   prepare host PCI/SR-IOV resources (never creates a VM)\n'
+              '  agent create/verify/rebuild a Debian work VM (never prepares host drivers)')
+        return 0
+    try:
+        if argv[0] == 'gpu':
+            from onepve_gpu import main as entry
+        elif argv[0] == 'agent':
+            from onepve_agent import main as entry
+        else:
+            raise ValueError('Choose gpu or agent')
+        return entry(argv[1:]) or 0
+    except (RuntimeError, ValueError, OSError, TimeoutError, subprocess.SubprocessError) as error:
+        print(json.dumps({'status': 'ERROR', 'error': str(error)}, ensure_ascii=False), file=sys.stderr)
+        return 2
+
+
+if __name__ == '__main__':
+    sys.exit(main())

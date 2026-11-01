@@ -1,71 +1,59 @@
-#!/bin/bash
-#@description:  （显卡）直通设置：
-#@author: Fred Zhang Qi
-#@datetime: 2023-12-17
+#!/usr/bin/env bash
+# GPU preparation is separate from VM creation and never reboots the host.
 
-#dependencies--文件依赖
-#none
+ONEPVE_ROOT="${ONEPVE_ROOT:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)}"
+
+onepve_cli() {
+  python3 "$ONEPVE_ROOT/onepve.py" "$@"
+}
+
+onepve_pci_input() {
+  [[ "$1" =~ ^([[:xdigit:]]{4}:)?[[:xdigit:]]{2}:[[:xdigit:]]{2}\.[0-7]$ ]]
+}
+
+onepve_gpu_apply() {
+  local answer
+  onepve_cli gpu "$@" --dry-run || return
+  read -r -p '应用以上变更？[y/N]：' answer || return
+  [[ "$answer" == y || "$answer" == Y ]] || return 0
+  onepve_cli gpu "$@"
+}
 
 the_pass_through() {
-  the_module_replace
-  the_blacklist_replace
-  the_boot_configuration
-}
-
-the_module_replace() {
-  sources_list="/etc/modules"
-  backup_file="$sources_list.bak"
-
-  if [ ! -f "$backup_file" ]; then
-    mv $sources_list $backup_file
-    echo "已备份原有modules -> modules.bak"
-    echo "# 设置直通
-vfio
-vfio_iommu_type1
-vfio_pci
-vfio_virqfd
-" >/etc/modules
-  else
-    echo "备份文件已存在，跳过"
-  fi
-}
-
-the_blacklist_replace() {
-  sources_list="/etc/modprobe.d/pve-blacklist.conf"
-  backup_file="$sources_list.bak"
-
-  if [ ! -f "$backup_file" ]; then
-    mv $sources_list $backup_file
-    echo "已备份原有pve-blacklist.conf -> pve-blacklist.conf.bak"
-    echo "# 更新硬件黑名单
-# This file contains a list of modules which are not supported by Proxmox VE 
-# nvidiafb see bugreport https://bugzilla.proxmox.com/show_bug.cgi?id=701
-blacklist i915
-blacklist nouveau
-blacklist nvidia
-blacklist nvidiafb
-blacklist snd_hda_codec_hdmi
-blacklist snd_hda_intel
-blacklist snd_hda_codec
-blacklist snd_hda_core
-blacklist radeon
-blacklist amdgpu
-options vfio_iommu_type1 allow_unsafe_interrupts=1
-" >/etc/modprobe.d/pve-blacklist.conf
-  else
-    echo "备份文件已存在，跳过"
-  fi
-}
-
-the_boot_configuration() {
-  echo -e "\033[33m 🚀是否需要更新grub配置 & initramfs？(y/n)"
-  read need_config_boot
-  echo -e "\033[0m"
-  if [ "$need_config_boot" != "y" ]; then
-    echo "不需要，跳过..."
-  else
-    sed -i "s/\"quiet\"/\"quiet intel_iommu=on initcall_blacklist=sysfb_init\"/g" /etc/default/grub
-    update-grub
-    update-initramfs -u -k all
-  fi
+  local choice pci count resource
+  while true; do
+    printf '\n03 显卡直通／SR-IOV：先准备宿主设备，再到08创建系统\n'
+    printf '%s\n' '1. 检测硬件与占用（只读）' '2. 查看准备状态（只读）' \
+      '3. 准备 Intel SR-IOV' '4. 准备选定设备独占直通' \
+      '5. 撤销 onePVE 拥有的配置' '0. 返回'
+    read -r -p '选择：' choice || return
+    case "$choice" in
+      1) onepve_cli gpu inventory ;;
+      2) onepve_cli gpu status ;;
+      3)
+        onepve_cli gpu inventory || continue
+        read -r -p 'Intel PF 地址，例如 0000:00:02.0：' pci || return
+        onepve_pci_input "$pci" || { printf 'PCI 地址格式无效。\n'; continue; }
+        read -r -p 'VF 数量 [1]：' count || return
+        count="${count:-1}"
+        [[ "$count" =~ ^[1-9][0-9]{0,2}$ ]] || { printf 'VF 数量必须是正整数。\n'; continue; }
+        onepve_gpu_apply prepare-sriov --pf "$pci" --num-vfs "$count"
+        ;;
+      4)
+        onepve_cli gpu inventory || continue
+        read -r -p '要独占直通的 PCI 地址：' pci || return
+        onepve_pci_input "$pci" || { printf 'PCI 地址格式无效。\n'; continue; }
+        onepve_gpu_apply prepare-passthrough --bdf "$pci"
+        ;;
+      5)
+        onepve_cli gpu status || continue
+        read -r -p '要恢复的资源 ID（按状态输出填写）：' resource || return
+        [[ "$resource" =~ ^[A-Za-z0-9][A-Za-z0-9_.:-]*$ ]] || { printf '资源 ID 无效。\n'; continue; }
+        onepve_gpu_apply restore --resource "$resource"
+        ;;
+      0 | 00 | '') return ;;
+      *) printf '选择无效。\n' ;;
+    esac
+    printf '本菜单不会创建/删除 VM，也不会自动重启宿主。\n'
+  done
 }

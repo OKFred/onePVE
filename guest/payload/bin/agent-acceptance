@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+set -euo pipefail
+source /opt/onepve-agent/bin/common.sh
+exec /opt/onepve-agent/bin/agent-verify "$@"

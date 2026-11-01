@@ -1,0 +1,11 @@
+[Unit]
+Description=Local Node frontend acceptance fixture
+PartOf=onepve-agent-session.target
+
+[Service]
+Type=simple
+ExecStart=/opt/onepve-agent/bin/agent-run-fixture
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=10

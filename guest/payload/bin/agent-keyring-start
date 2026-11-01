@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+source /opt/onepve-agent/bin/common.sh
+export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$AGENT_UID/bus"
+exec /usr/bin/python3 /opt/onepve-agent/share/keyring_start.py

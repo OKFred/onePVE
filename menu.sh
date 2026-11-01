@@ -1,65 +1,59 @@
-#!/bin/bash
-#@description: 菜单化显示工具箱列表
-#@author: Fred Zhang Qi
-#@datetime: 2023-12-24
+#!/usr/bin/env bash
 
-#文件依赖
-#⚠️import--需要引入包含函数的文件
-source ./components/the_repo_localization.sh
-source ./components/the_basic_setup.sh
-source ./components/the_pass_through.sh
-source ./components/the_cluster_exit.sh
-source ./components/the_swap_configuration.sh
-source ./components/the_network_dhcp.sh
-source ./components/the_backup_restore.sh
+ONEPVE_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+
+onepve_load_components() {
+  local previous="$PWD" component
+  # Legacy components resolve their own dependencies relative to cwd.
+  cd -- "$ONEPVE_ROOT" || return
+  for component in the_repo_localization the_basic_setup the_pass_through \
+    the_cluster_exit the_swap_configuration the_network_dhcp the_backup_restore \
+    the_agent_workstation; do
+    source "$ONEPVE_ROOT/components/$component.sh" || { cd -- "$previous"; return 1; }
+  done
+  cd -- "$previous"
+}
 
 menu_title() {
   date
-  echo "Root Required--执行需要管理员权限。请注意"
-  echo "*********************"
-  echo "*****   工具箱Tool   *****"
+  printf '%s\n' 'onePVE 工具箱（宿主操作需要 root）' \
+    '先用03准备显卡，再用08创建 Agent 工作机。'
 }
 
 menu_back() {
-  echo
-  echo -n "press any key--按任意键返回."
-  read
-  clear
+  read -r -p '按回车返回。' _
 }
 
 main() {
-  while (true); do
+  if [[ "$EUID" -ne 0 ]]; then
+    printf '请在 PVE 宿主上以 root 运行本菜单。\n' >&2
+    return 1
+  fi
+  onepve_load_components || return
+  local choice
+  while true; do
     menu_title
-    echo "01. local repo--更换国内源"
-    echo "02. basic setup--安装基础工具nano、wget、git等"
-    echo "03. graphic card pass through--配置显卡直通"
-    echo "04. cluster exit--退出集群"
-    echo "05. SWAP config--启用/禁用SWAP"
-    echo "06. static IP to DHCP--网卡改DHCP"
-    echo "07. backup and restore configs--重点文件备份&还原"
-    echo "08. more--更多"
-    echo "09. about--关于"
-    echo "00. exit--退出"
-    echo
-    echo -n "your choice--请输入你的选择："
-    read the_user_choice
-    case "$the_user_choice" in
-    01 | 1) the_repo_localization ;;
-    02 | 2) the_basic_setup ;;
-    03 | 3) the_pass_through ;;
-    04 | 4) the_cluster_exit ;;
-    05 | 5) the_swap_configuration ;;
-    06 | 6) the_network_dhcp ;;
-    07 | 7) the_backup_restore ;;
-    08 | 8) echo 'wait and see--敬请期待' ;;
-    09 | 9) nano readme.md ;;
-    00 | 0 | "") exit 1 ;;
-    u) echo "???" ;;
-    *) echo "error input--输入有误，请重新输入！" && menu_back ;;
+    printf '%s\n' '01. 更换国内源' '02. 安装基础工具' \
+      '03. 显卡直通／SR-IOV 准备' '04. 退出集群' '05. SWAP 配置' \
+      '06. 网卡改 DHCP' '07. 旧版配置备份与还原' '08. Agent 工作机' \
+      '09. 关于与操作说明' '00. 退出'
+    read -r -p '选择：' choice || return 0
+    case "$choice" in
+      01 | 1) the_repo_localization ;;
+      02 | 2) the_basic_setup ;;
+      03 | 3) the_pass_through ;;
+      04 | 4) the_cluster_exit ;;
+      05 | 5) the_swap_configuration ;;
+      06 | 6) the_network_dhcp ;;
+      07 | 7) the_backup_restore ;;
+      08 | 8) the_agent_workstation ;;
+      09 | 9) cat -- "$ONEPVE_ROOT/readme.md" ;;
+      00 | 0 | '') return 0 ;;
+      *) printf '选择无效。\n' ;;
     esac
-    echo
   done
 }
 
-clear
-main
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi

@@ -1,0 +1,15 @@
+[Unit]
+Description=Independent persistent Chromium browser
+PartOf=onepve-agent-session.target
+Wants=onepve-agent-fixture.service onepve-agent-wayland.service
+Requires=onepve-agent-keyring.service
+After=onepve-agent-fixture.service onepve-agent-wayland.service onepve-agent-keyring.service
+
+[Service]
+Type=simple
+ExecStart=/opt/onepve-agent/bin/agent-run-chromium
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=90
+KillMode=mixed
+SendSIGKILL=no

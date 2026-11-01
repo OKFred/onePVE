@@ -1,0 +1,29 @@
+# 显卡直通／SR-IOV 准备
+
+菜单03只准备宿主设备，菜单08才创建或重建系统。两个入口使用同一套设备检测、占用检查和状态记录；没有硬编码的待删除VM、PCI地址或render节点。
+
+## 检测与选择
+
+先运行只读检测，查看PVE、运行内核、启动方式、IOMMU分组、GPU的PF/VF关系、当前驱动和使用者。独占直通只针对选定PCI设备；分组或设备仍被其他VM／进程使用时拒绝操作，不为通过检查而启用ACS override或unsafe interrupts。
+
+选择Intel SR-IOV时保留PF的`i915`，默认一个VF，仅将选定VF交给`vfio-pci`。已有健康VF优先复用；使用中的VF不会被清零重建。已有第三方或手工配置的宿主启动服务属于外部提供者，工具不会冒领所有权或在恢复时卸载它。
+
+## 驱动与启动
+
+驱动来自社区项目 [strongtz/i915-sriov-dkms](https://github.com/strongtz/i915-sriov-dkms)，不是Intel官方发行。宿主和客机分别按已验证兼容表选固定tag、commit与校验值，不使用浮动`latest`，也不要求两边强行使用同一版本。
+
+构建后检查运行内核、headers、模块vermagic及所需依赖；不兼容组合只给出诊断，不自动升级PVE或宿主内核。Secure Boot启用且签名条件不满足时停止，不擅自关闭保护。
+
+工具区分GRUB与systemd-boot/proxmox-boot-tool，只修改自己的配置片段，并保存归属与原始元数据。需要重启时返回明确的待重启状态；菜单不会自动重启。应先检查PVE中其他工作负载，再由管理员独立安排重启。
+
+VF准备服务在`pve-guests.service`前运行；GPU准备失败只应阻止依赖它的目标VM，不把全部VM设成GPU成功的依赖者。VF自动probe策略必须在新建VF前设置，不能依靠事后改值重新绑定已在使用的VF。[Linux PCI SR-IOV文档](https://docs.kernel.org/PCI/pci-iov-howto.html)
+
+## 精确恢复
+
+菜单03恢复前先显示只读计划，检查本工具记录的资源、当前文件hash、设备驱动和使用者。只恢复本工具拥有且未被外部修改的配置；发现其他使用者或外部编辑时停止。
+
+不整体覆盖`/etc/modules`，不全局屏蔽Intel／NVIDIA／AMD和音频驱动，不清零共享PF，不调用旧菜单07。历史ROM文件仅供人工研究，不会自动套用到Arrow Lake-S，也不安装实验QEMU或修改Windows VM。
+
+## 验收范围
+
+宿主就绪仅说明设备可分配；客机是否真正加速由菜单08独立验收。原生EGL、准确设备文件句柄和WebGL1/2绘制必须实测。设备型号、内核和包版本以本次记录为准，不把某台机器的成功结果推广成所有硬件都已通过。

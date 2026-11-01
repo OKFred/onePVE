@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -euo pipefail
+source /opt/onepve-agent/bin/common.sh
+umask 077
+# Write the persistent gate first. A service restart or subsequent login cannot
+# re-enable MCP while the human owns the desktop.
+printf 'manual takeover requested at %s\n' "$(date -u +%FT%TZ)" > "$MANUAL_LOCK"
+systemctl --user stop onepve-agent-mcp.service
+if systemctl --user is-active --quiet onepve-agent-mcp.service; then
+  printf 'MCP has not stopped; do not send manual input yet.\n' >&2
+  exit 1
+fi
+if ss -H -ltn 'sport = :8931' | /usr/bin/awk 'END {exit NR == 0}'; then
+  printf 'Port 8931 is still in use outside the managed MCP service; manual.lock is retained. Do not send manual input yet.\n' >&2
+  notify_desktop 'Takeover blocked: another control listener still uses port 8931. Keep manual.lock and inspect it first.'
+  exit 1
+fi
+printf 'Manual mode active. Browser, VNC and noVNC remain running.\n'
+notify_desktop 'Manual mode: MCP stopped. You may operate this browser. Resume explicitly when finished.'

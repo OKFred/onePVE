@@ -1,0 +1,11 @@
+[Unit]
+Description=Persistent browser takeover and return controls
+PartOf=onepve-agent-session.target
+After=onepve-agent-wayland.service
+
+[Service]
+Type=simple
+ExecStart=/opt/onepve-agent/bin/agent-run-controls
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=10

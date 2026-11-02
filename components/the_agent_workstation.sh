@@ -69,8 +69,8 @@ PY
   [[ $? -eq 0 ]] || return 1
   read -r -p 'vCPU，最低4 [4]：' cores || return; cores="${cores:-4}"
   read -r -p '固定内存 MiB，最低8192 [8192]：' memory || return; memory="${memory:-8192}"
-  read -r -p '磁盘 GiB，最低64 [64]：' disk || return; disk="${disk:-64}"
-  onepve_agent_number "$cores" 4 && onepve_agent_number "$memory" 8192 && onepve_agent_number "$disk" 64 || {
+  read -r -p '磁盘 GiB，最低32 [32]：' disk || return; disk="${disk:-32}"
+  onepve_agent_number "$cores" 4 && onepve_agent_number "$memory" 8192 && onepve_agent_number "$disk" 32 || {
     printf '资源配置低于最低要求或不是有效整数。\n'; return 1;
   }
   read -r -p 'SSH 公钥文件路径（或输入 paste 粘贴公钥，切勿提供私钥）：' key_source || return

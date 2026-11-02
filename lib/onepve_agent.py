@@ -99,10 +99,10 @@ def public_key(value):
 
 def normalize(values):
     values=dict(values)
-    defaults=dict(name='agent-browser',cores=4,memory=8192,disk=64,gpu='auto',viewer_port=16080,
+    defaults=dict(name='agent-browser',cores=4,memory=8192,disk=32,gpu='auto',viewer_port=16080,
                   mac=None,expected_ip=None,snippets_storage=None,address=None,gateway=None,nameserver=None)
     for key,value in defaults.items(): values.setdefault(key,value)
-    for field,minimum,maximum in [('vmid',100,999999999),('cores',4,1024),('memory',8192,10485760),('disk',64,1048576),('viewer_port',1024,65535)]:
+    for field,minimum,maximum in [('vmid',100,999999999),('cores',4,1024),('memory',8192,10485760),('disk',32,1048576),('viewer_port',1024,65535)]:
         need(type(values.get(field)) is int and minimum<=values[field]<=maximum, 'Invalid/minimum resource: '+field)
     need(re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9.-]{0,62}',values['name']), 'Invalid VM name')
     for field in ['storage','bridge']:
@@ -900,7 +900,7 @@ def main(argv=None):
         child=commands.add_parser(action)
         child.add_argument('--vmid',type=int,required=True);child.add_argument('--name',default='agent-browser')
         child.add_argument('--storage',required=True);child.add_argument('--snippets-storage');child.add_argument('--bridge',required=True)
-        child.add_argument('--cores',type=int,default=4);child.add_argument('--memory',type=int,default=8192);child.add_argument('--disk',type=int,default=64)
+        child.add_argument('--cores',type=int,default=4);child.add_argument('--memory',type=int,default=8192);child.add_argument('--disk',type=int,default=32)
         keys=child.add_mutually_exclusive_group(required=True);keys.add_argument('--ssh-key');keys.add_argument('--ssh-key-file',type=Path)
         child.add_argument('--gpu',default='auto');child.add_argument('--mac');child.add_argument('--expected-ip');child.add_argument('--viewer-port',type=int,default=16080)
         child.add_argument('--address',help='Optional static IPv4 CIDR; default is DHCP')

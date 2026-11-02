@@ -158,6 +158,12 @@ def seed_profile(home, owner):
     return False
 
 
+def require_disk_capacity(total):
+    # A 32 GiB VM disk also contains EFI/boot partitions and filesystem metadata.
+    if total < 31 * 1024**3:
+        raise RuntimeError('Expand the root filesystem on a >=32 GiB disk before installation')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--manifest', type=Path, required=True)
@@ -171,8 +177,7 @@ def main():
         raise RuntimeError('Only Debian 13 is supported')
     if os.cpu_count() < 4 or int(re.search(r'MemTotal:\s+(\d+)', Path('/proc/meminfo').read_text())[1]) < 7864320:
         raise RuntimeError('At least 4 vCPU and fixed 8 GiB memory are required')
-    if shutil.disk_usage('/').total < 60_000_000_000:
-        raise RuntimeError('Expand the root filesystem on a >=64 GiB disk before installation')
+    require_disk_capacity(shutil.disk_usage('/').total)
     # Executable payload/config directories must be traversable by the ordinary
     # desktop user; private state/files get explicit 0700/0600 below.
     os.umask(0o022)

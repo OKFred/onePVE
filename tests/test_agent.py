@@ -68,7 +68,10 @@ class AgentTests(unittest.TestCase):
 
     def test_minimum_resources_and_no_shell_values(self):
         self.assertEqual(config()['memory'],8192)
-        for values in [dict(cores=3),dict(memory=8191),dict(disk=63),dict(vmid=99),dict(storage='x;reboot'),dict(bridge='../vmbr0'),dict(mac='FF:00:00:00:00:01')]:
+        self.assertEqual(config()['disk'],32)
+        self.assertEqual(config(disk=32)['disk'],32)
+        self.assertEqual(config(disk=64)['disk'],64)
+        for values in [dict(cores=3),dict(memory=8191),dict(disk=31),dict(vmid=99),dict(storage='x;reboot'),dict(bridge='../vmbr0'),dict(mac='FF:00:00:00:00:01')]:
             with self.subTest(values=values),self.assertRaises(RuntimeError):config(**values)
 
     def test_static_network_is_validated_and_bound_to_expected_address(self):
@@ -272,6 +275,7 @@ class AgentTests(unittest.TestCase):
             agent.main(['plan','--vmid','103','--storage','pool','--bridge','vmbr0','--ssh-key',PUBLIC,
                         '--address','192.168.11.144/24','--gateway','192.168.11.1','--nameserver','192.168.11.1'])
         value=plan.call_args.args[0]
+        self.assertEqual(value['disk'],32)
         self.assertEqual(value['address'],'192.168.11.144/24');self.assertEqual(value['gateway'],'192.168.11.1');self.assertEqual(value['nameserver'],'192.168.11.1')
 
     def disk_context(self,raw,owned,paths):
@@ -438,7 +442,7 @@ class AgentTests(unittest.TestCase):
         for flag,value in [('--cores','4'),('--memory','8192'),('--balloon','0'),('--bios','ovmf'),('--machine','q35'),('--vga','virtio'),('--scsihw','virtio-scsi-single')]:
             self.assertEqual(create[create.index(flag)+1],value)
         self.assertEqual(s['phase'],'CLOUD_READY');self.assertIn('discard=on',current['scsi0'])
-        self.assertIn(['qm','disk','resize','103','scsi0','64G'],calls)
+        self.assertIn(['qm','disk','resize','103','scsi0','32G'],calls)
         self.assertEqual(current['ipconfig0'],'ip=dhcp')
         self.assertFalse(any('hostpci0' in str(command) or 'reboot' in command or 'modprobe' in command for command in calls))
 

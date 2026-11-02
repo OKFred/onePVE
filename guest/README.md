@@ -8,7 +8,8 @@ bash guest/install.sh --manifest /root/onepve-agent.json
 
 This installer never changes PVE, host drivers, a client computer, or an existing
 browser profile/keyring. It targets Debian13 amd64 with at least4vCPU, fixed8GiB,
-and an expanded root filesystem on a64GiB disk. Cloud-init supplies the user's SSH
+and an expanded root filesystem on a disk of at least 32 GiB (the new-VM default).
+Cloud-init supplies the user's SSH
 public key; passwords, private keys and Codex login tokens do not enter the image.
 
 The JSON manifest fields and defaults are:

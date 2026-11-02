@@ -30,6 +30,13 @@ installer = load('guest_installer', ROOT / 'guest/install.py')
 
 
 class ManifestTests(unittest.TestCase):
+    def test_32_gib_disk_allows_partition_overhead_with_31_gib_filesystem_floor(self):
+        with self.assertRaisesRegex(RuntimeError, '>=32 GiB disk'):
+            installer.require_disk_capacity(31 * 1024**3 - 1)
+        self.assertIsNone(installer.require_disk_capacity(31 * 1024**3))
+        self.assertIsNone(installer.require_disk_capacity(int(31.9 * 1024**3)))
+        self.assertIsNone(installer.require_disk_capacity(32 * 1024**3))
+
     def read(self, value):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'manifest.json'

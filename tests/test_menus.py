@@ -66,8 +66,8 @@ class MenuTests(unittest.TestCase):
 
     @staticmethod
     def form(vmid='', cores='', key='ssh-ed25519 AAAA demo', confirmation='n',
-             network='', address='', gateway='', nameserver='', expected_ip=''):
-        fields = [vmid, '', '', '', cores, '', '', 'paste', key, '', '', network]
+             network='', address='', gateway='', nameserver='', expected_ip='', disk=''):
+        fields = [vmid, '', '', '', cores, '', disk, 'paste', key, '', '', network]
         if network == 'static':
             fields.extend([address, gateway, nameserver])
         fields.extend([expected_ip, '', confirmation])
@@ -132,6 +132,9 @@ class MenuTests(unittest.TestCase):
         self.assertEqual(calls[0][:2], ['agent', 'plan'])
         self.assertEqual(calls[0][calls[0].index('--ssh-key') + 1], 'ssh-ed25519 AAAA demo')
         self.assertEqual(calls[0][calls[0].index('--vmid') + 1], '219')
+        self.assertEqual(calls[0][calls[0].index('--cores') + 1], '4')
+        self.assertEqual(calls[0][calls[0].index('--memory') + 1], '8192')
+        self.assertEqual(calls[0][calls[0].index('--disk') + 1], '32')
         self.assertIn('test-images', calls[0])
         self.assertIn('br-test', calls[0])
         for option in ['--address', '--gateway', '--nameserver']:
@@ -142,6 +145,21 @@ class MenuTests(unittest.TestCase):
         calls = self.calls(result.stdout)
         self.assertEqual([x[:2] for x in calls], [['agent', 'plan'], ['agent', 'create']])
         self.assertEqual(calls[0][2:], calls[1][2:])
+
+    def test_agent_disk_minimum_accepts_32_and_rejects_31_before_plan(self):
+        for disk, accepted in [('31', False), ('32', True)]:
+            with self.subTest(disk=disk):
+                result = self.shell(self.agent_code('create'),
+                                    self.form(disk=disk, confirmation='y'), check=False)
+                calls = self.calls(result.stdout)
+                if accepted:
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertEqual([x[:2] for x in calls], [['agent', 'plan'], ['agent', 'create']])
+                    for call in calls:
+                        self.assertEqual(call[call.index('--disk') + 1], '32')
+                else:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertEqual(calls, [])
 
     def test_agent_static_network_passes_validated_arguments_to_plan_and_create(self):
         result = self.shell(self.agent_code('create'), self.form(

@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+source /opt/onepve-agent/bin/common.sh
+if [[ -e "$MANUAL_LOCK" ]]; then printf 'mode=manual\n'; else printf 'mode=agent\n'; fi
+printf 'node_pin=%s\nmcp_pin=%s\nfnm_pin=%s\n' "$NODE_VERSION" "$MCP_VERSION" "$FNM_VERSION"
+for service in chromium mcp vnc novnc fixture; do
+  status=$(systemctl --user is-active "onepve-agent-$service.service" || true)
+  printf '%s=%s\n' "$service" "$status"
+done

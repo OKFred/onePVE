@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Agent browser session
+Comment=Import the current XFCE display and start the dedicated browser services
+Exec=/opt/onepve-agent/bin/agent-session-start
+OnlyShowIn=XFCE;
+Terminal=false
+X-GNOME-Autostart-enabled=true

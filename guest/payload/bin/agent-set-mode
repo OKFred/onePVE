@@ -1,0 +1,114 @@
+#!/usr/bin/python3
+"""Switch only the owned browser stack; SSH, desktop, keyring and frontend stay."""
+import fcntl
+import json
+import os
+from pathlib import Path
+import re
+import socket
+import subprocess
+import sys
+import time
+sys.path.insert(0, '/opt/onepve-agent/share')
+from runtime_config import config, mode, process_argv
+
+
+def select_mode(value, bdf=''):
+    if value not in {'x11', 'wayland'}:
+        raise ValueError('Expected x11 or wayland')
+    if value == 'wayland':
+        if not re.fullmatch(r'0000:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]', bdf):
+            raise ValueError('Wayland requires an exact guest PCI BDF')
+        device = Path('/sys/bus/pci/devices') / bdf
+        if ((device / 'vendor').read_text().strip() != '0x8086'
+                or (device / 'driver').resolve(strict=True).name != 'i915'):
+            raise RuntimeError('Selected guest GPU must already be bound to Intel i915')
+    return {'mode': value, 'gpu_bdf': bdf if value == 'wayland' else ''}
+
+
+def main():
+    if len(sys.argv) not in (2, 3) or os.getuid() != 0:
+        raise SystemExit('Use guest root: agent-set-mode x11|wayland [GUEST_BDF]')
+    desired = select_mode(sys.argv[1], sys.argv[2] if len(sys.argv) == 3 else '')
+    settings = config(); home = settings['home']; uid = settings['uid']
+    env = dict(os.environ, HOME=str(home), XDG_RUNTIME_DIR='/run/user/' + str(uid),
+               DBUS_SESSION_BUS_ADDRESS='unix:path=/run/user/' + str(uid) + '/bus')
+    prefix = ['/usr/sbin/runuser', '-u', settings['user'], '--', 'systemctl', '--user']
+    def unit(*args, check=True):
+        return subprocess.run(prefix + list(args), env=env, check=check, capture_output=True, text=True, timeout=120)
+    def props(name):
+        result = unit('show', name, '-p', 'ActiveState,MainPID,Result')
+        return dict(x.split('=', 1) for x in result.stdout.splitlines() if '=' in x)
+    def wait_port(port):
+        end = time.monotonic() + 45
+        while time.monotonic() < end:
+            try:
+                with socket.create_connection(('127.0.0.1', port), timeout=1):
+                    return
+            except OSError:
+                time.sleep(.25)
+        raise RuntimeError('Managed service readiness timed out on ' + str(port))
+    def write(value):
+        path = Path('/etc/onepve-agent/mode.json')
+        temporary = path.with_suffix('.onepve-new')
+        with temporary.open('x') as stream:
+            json.dump(value, stream); stream.write('\n'); stream.flush(); os.fsync(stream.fileno())
+        temporary.chmod(0o644); temporary.replace(path)
+    def stop_browser_stack():
+        unit('stop', 'onepve-agent-mcp.service')
+        unit('stop', 'onepve-agent-chromium.service')
+        current = props('onepve-agent-chromium.service')
+        if current['MainPID'] != '0' or current['ActiveState'] not in {'inactive', 'failed'}:
+            raise RuntimeError('Browser still closing; do not start another profile owner')
+        profile_argument = ('--user-data-dir=' + str(home / '.local/share/onepve-agent/chromium')).encode()
+        for process in Path('/proc').iterdir():
+            if not process.name.isdecimal():
+                continue
+            try:
+                if profile_argument in process_argv(process):
+                    raise RuntimeError('A profile process remains outside the managed service')
+                for fd in (process / 'fd').iterdir():
+                    try:
+                        target = os.readlink(fd)
+                        if target.startswith(str(home / '.local/share/onepve-agent/chromium') + '/'):
+                            raise RuntimeError('A browser profile file descriptor remains open')
+                    except FileNotFoundError:
+                        pass
+            except (FileNotFoundError, ProcessLookupError):
+                pass
+        unit('stop', 'onepve-agent-controls.service', 'onepve-agent-vnc.service', 'onepve-agent-wayland.service')
+    def start_browser_stack():
+        unit('reset-failed', *['onepve-agent-' + x + '.service' for x in ['wayland', 'chromium', 'vnc', 'controls', 'mcp']], check=False)
+        unit('start', 'onepve-agent-wayland.service', 'onepve-agent-chromium.service',
+             'onepve-agent-vnc.service', 'onepve-agent-controls.service', 'onepve-agent-novnc.service')
+        wait_port(9222); wait_port(5900); wait_port(6080)
+        marker = home / '.local/state/onepve-agent/manual.lock'
+        if not os.path.lexists(marker):
+            unit('start', 'onepve-agent-mcp.service'); wait_port(8931)
+        elif props('onepve-agent-mcp.service')['ActiveState'] == 'active':
+            raise RuntimeError('Persistent manual mode must keep MCP stopped')
+    Path('/var/lib/onepve-agent').mkdir(mode=0o700, exist_ok=True)
+    with Path('/var/lib/onepve-agent/mode.lock').open('a') as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        previous = mode()
+        protected = {name: props(name) for name in ['onepve-agent-fixture.service', 'onepve-agent-novnc.service', 'gnome-keyring-daemon.service', 'dbus.service']}
+        if desired == previous and props('onepve-agent-chromium.service')['ActiveState'] == 'active':
+            start_browser_stack()
+            print(json.dumps({'status': 'UNCHANGED', **desired})); return
+        stop_browser_stack(); write(desired)
+        try:
+            start_browser_stack()
+        except BaseException as error:
+            if desired['mode'] != 'wayland':
+                raise
+            stop_browser_stack(); write({'mode': 'x11', 'gpu_bdf': ''}); start_browser_stack()
+            print(json.dumps({'status': 'GPU_FAILED_SOFTWARE_READY', 'error_type': type(error).__name__, 'mode': 'x11'}))
+            raise SystemExit(2)
+        for name, original in protected.items():
+            if original.get('ActiveState') == 'active' and props(name) != original:
+                raise RuntimeError('Unrelated frontend/user-bus/keyring service changed: ' + name)
+        print(json.dumps({'status': 'MODE_READY', **desired}))
+
+
+if __name__ == '__main__':
+    main()

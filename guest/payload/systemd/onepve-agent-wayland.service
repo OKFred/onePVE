@@ -1,0 +1,15 @@
+[Unit]
+Description=Dedicated Intel Wayland compositor
+PartOf=onepve-agent-session.target
+Before=onepve-agent-chromium.service onepve-agent-vnc.service onepve-agent-controls.service
+
+[Service]
+Type=simple
+ExecCondition=/opt/onepve-agent/bin/agent-mode-is wayland
+ExecStart=/opt/onepve-agent/bin/agent-run-wayland
+ExecStartPost=/usr/bin/python3 /opt/onepve-agent/share/wayland-session.py ready --wait 30
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=40
+TimeoutStopSec=15
+KillMode=control-group

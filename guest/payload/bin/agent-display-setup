@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+set -euo pipefail
+source /opt/onepve-agent/bin/common.sh
+require_x11
+
+report_failure() {
+  printf 'Display setup: %s\n' "$1" >&2
+  notify_desktop "$1"
+}
+query_display() { timeout 5 xrandr --query; }
+output=''
+# Wait for both the real output and xfsettingsd; no second X server is created.
+for attempt in {1..20}; do
+  query=$(query_display 2>/dev/null || true)
+  output=$(printf '%s\n' "$query" | awk '
+    $2 == "connected" && $1 ~ /^Virtual-[A-Za-z0-9_-]+$/ {
+      if ($3 == "primary") { print $1; found=1; exit }
+      if (first == "") first=$1
+    }
+    END { if (!found) print first }
+  ')
+  if [[ -n $output ]] && pgrep -u "$(id -u)" -x xfsettingsd >/dev/null; then break; fi
+  sleep 0.5
+done
+if [[ -z $output ]]; then
+  report_failure 'No supported Virtual-* output became ready; display settings were retained.'
+  exit 0
+fi
+
+mode_rate() {
+  printf '%s\n' "$1" | awk -v output="$output" '
+    $1 == output && $2 == "connected" { selected=1; next }
+    /^[^[:space:]]/ { selected=0 }
+    selected && $1 == "1600x900" {
+      for (i=2; i<=NF; i++) {
+        gsub(/[+*]/, "", $i)
+        if ($i ~ /^[0-9]+([.][0-9]+)?$/ && $i >= 59 && $i <= 61) { print $i; exit }
+      }
+    }
+  '
+}
+rate=$(mode_rate "$query")
+if [[ -z $rate ]]; then
+  # CVT 1600x900@60, verified against the guest's existing libxcvt 0.1.3:
+  # exact refresh 59.9460206995 Hz, -HSync +VSync. Only this virtual mode is added;
+  # existing modes are never removed or replaced.
+  if ! xrandr --newmode 1600x900 118.25 1600 1688 1856 2112 900 903 908 934 -hsync +vsync; then
+    printf 'Display setup: mode creation failed or the named mode already exists; trying to attach it.\n' >&2
+  fi
+  if ! xrandr --addmode "$output" 1600x900; then
+    report_failure 'The virtual GPU rejected the fixed 1600x900 mode; existing settings were retained.'
+    exit 0
+  fi
+  query=$(query_display 2>/dev/null || true)
+  rate=$(mode_rate "$query")
+fi
+if [[ -z $rate ]]; then
+  report_failure '1600x900 near 60 Hz is unavailable after mode registration; existing settings were retained.'
+  exit 0
+fi
+
+profile="/Default/$output"
+set_display_property() { xfconf-query -c displays -p "$profile/$1" -n -t "$2" -s "$3"; }
+# Xfce 4.20 requires the output itself to be a string property. Scale is a scalar
+# double, Reflection a string, RefreshRate a double, and positions/rotation ints.
+if ! {
+  xfconf-query -c displays -p "$profile" -n -t string -s "$output" &&
+  set_display_property Active bool true &&
+  set_display_property Primary bool true &&
+  set_display_property Resolution string 1600x900 &&
+  set_display_property RefreshRate double "$rate" &&
+  set_display_property Rotation int 0 &&
+  set_display_property Reflection string 0 &&
+  set_display_property Scale double 1 &&
+  set_display_property Position/X int 0 &&
+  set_display_property Position/Y int 0
+}; then
+  report_failure 'The persistent Xfce display profile could not be written; session startup will continue.'
+  exit 0
+fi
+for legacy in Scale/X Scale/Y; do
+  if xfconf-query -c displays -p "$profile/$legacy" >/dev/null 2>&1; then
+    xfconf-query -c displays -p "$profile/$legacy" -r || true
+  fi
+done
+xfconf-query -c xsettings -p /Gdk/WindowScalingFactor -n -t int -s 1 || report_failure 'XFCE window scaling could not be set to 100%.'
+xfconf-query -c xsettings -p /Xft/DPI -n -t int -s 96 || report_failure 'XFCE font DPI could not be set to 96.'
+
+# xfsettingsd debounces RRScreenChangeNotify with a one-second GLib timer. Allow
+# that cache refresh to finish before Apply; applying after only 0.5 seconds can
+# reject a newly registered mode against its old cache and restore the old mode.
+for attempt in {1..5}; do
+  if ! xrandr --output "$output" --mode 1600x900 --rate "$rate" --scale 1x1 --primary --dpi 96; then
+    printf 'Display setup: applying 1600x900 failed on attempt %s.\n' "$attempt" >&2
+  fi
+  sleep 2.5
+  xfconf-query -c displays -p /Schemes/Apply -n -t string -s Default || true
+  sleep 1
+  query=$(query_display 2>/dev/null || true)
+  if printf '%s\n' "$query" | awk -v output="$output" '
+    $1 == output && $2 == "connected" {
+      for (i=3; i<=NF; i++) if ($i ~ /^1600x900[+]/) found=1
+    }
+    END { exit !found }
+  '; then
+    printf 'Display setup: %s is 1600x900 at %s Hz, 100%% scaling; Default profile saved.\n' "$output" "$rate"
+    exit 0
+  fi
+done
+report_failure '1600x900 did not remain active after bounded retries; inspect xrandr and the Xfce displays channel.'

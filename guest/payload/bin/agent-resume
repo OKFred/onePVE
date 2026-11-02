@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+set -euo pipefail
+source /opt/onepve-agent/bin/common.sh
+if [[ ${1:-} != --yes ]]; then
+  if [[ -n ${DISPLAY:-} ]] && command -v zenity >/dev/null 2>&1; then
+    zenity --question --title='Resume agent browser control' \
+      --text='Return this browser to agent control? Stop manual input after continuing.' || exit 0
+  else
+    printf 'Use agent-resume --yes to explicitly return browser control.\n' >&2
+    exit 1
+  fi
+fi
+rm -f -- "$MANUAL_LOCK"
+systemctl --user reset-failed onepve-agent-mcp.service || true
+if ! systemctl --user start onepve-agent-mcp.service; then
+  umask 077
+  printf 'resume failed; manual mode retained\n' > "$MANUAL_LOCK"
+  printf 'MCP failed to start; manual mode remains active.\n' >&2
+  exit 1
+fi
+ready=false
+for attempt in {1..30}; do
+  if [[ -e "$MANUAL_LOCK" ]]; then
+    printf 'A new takeover request superseded resume.\n' >&2
+    exit 1
+  fi
+  # A bare GET may return 400/405/406 until the client initializes MCP. Any HTTP
+  # response is enough for this availability check; curl has no --fail here.
+  if curl --silent --max-time 1 --output /dev/null http://127.0.0.1:8931/mcp; then
+    ready=true
+    break
+  fi
+  sleep 1
+done
+if [[ $ready != true ]]; then
+  umask 077
+  printf 'resume readiness failed; manual mode retained\n' > "$MANUAL_LOCK"
+  systemctl --user stop onepve-agent-mcp.service
+  printf 'MCP did not become reachable; manual mode remains active.\n' >&2
+  exit 1
+fi
+printf 'Agent control enabled. Ask Codex to reconnect MCP and refresh its snapshot.\n'
+notify_desktop 'Agent control enabled. Codex must refresh the page snapshot before acting.'

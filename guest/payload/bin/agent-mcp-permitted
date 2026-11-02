@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -euo pipefail
+source /opt/onepve-agent/bin/common.sh
+if ! mcp_permitted; then
+  printf 'Manual takeover is active; MCP stays stopped until agent-resume.\n' >&2
+  exit 1
+fi

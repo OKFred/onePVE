@@ -1,0 +1,11 @@
+[Unit]
+Description=Loopback viewer for the selected desktop
+After=onepve-agent-wayland.service
+PartOf=onepve-agent-session.target
+
+[Service]
+Type=simple
+ExecStart=/opt/onepve-agent/bin/agent-run-vnc
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=10

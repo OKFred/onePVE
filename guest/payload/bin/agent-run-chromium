@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+set -euo pipefail
+source /opt/onepve-agent/bin/common.sh
+mkdir -p "$PROFILE_DIR"
+chmod 700 "$PROFILE_DIR"
+initial_page=()
+if [[ ! -f "$PROFILE_DIR/Local State" ]]; then initial_page=(http://127.0.0.1:3000/); fi
+if /opt/onepve-agent/bin/agent-mode-is wayland; then
+  exec /usr/bin/python3 /opt/onepve-agent/share/wayland-session.py exec -- \
+    /usr/bin/chromium --user-data-dir="$PROFILE_DIR" --ozone-platform=wayland \
+    --remote-debugging-address=127.0.0.1 --remote-debugging-port=9222 \
+    --no-first-run --no-default-browser-check --restore-last-session \
+    --enable-gpu --disable-software-rasterizer "${initial_page[@]}"
+fi
+require_x11
+exec /usr/bin/chromium --user-data-dir="$PROFILE_DIR" --ozone-platform=x11 \
+  --remote-debugging-address=127.0.0.1 --remote-debugging-port=9222 \
+  --no-first-run --no-default-browser-check --restore-last-session "${initial_page[@]}"

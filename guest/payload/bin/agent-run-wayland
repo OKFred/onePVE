@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+source /opt/onepve-agent/bin/common.sh
+# The readiness probe reads only this process's appended log range.
+exec /usr/bin/python3 /opt/onepve-agent/share/wayland-session.py run >> "$STATE_DIR/wayland.log" 2>&1

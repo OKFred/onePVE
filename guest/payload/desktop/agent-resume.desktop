@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=交还 Codex
+Comment=Explicitly return the current browser to MCP control
+Exec=/opt/onepve-agent/bin/agent-resume
+Icon=media-playback-start
+Terminal=false
+Categories=Utility;

@@ -1,0 +1,4 @@
+[Unit]
+Description=Dedicated agent browser on the current XFCE desktop
+Wants=onepve-agent-keyring.service onepve-agent-wayland.service onepve-agent-controls.service onepve-agent-fixture.service onepve-agent-chromium.service onepve-agent-vnc.service onepve-agent-novnc.service onepve-agent-mcp.service
+After=graphical-session-pre.target

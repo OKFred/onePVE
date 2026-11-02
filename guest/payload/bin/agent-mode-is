@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+exec /usr/bin/python3 - "$1" <<'PY'
+import sys
+sys.path.insert(0, '/opt/onepve-agent/share')
+from runtime_config import mode
+raise SystemExit(0 if mode()['mode'] == sys.argv[1] else 1)
+PY

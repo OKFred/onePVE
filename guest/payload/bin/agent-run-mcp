@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+set -euo pipefail
+source /opt/onepve-agent/bin/common.sh
+if [[ -z ${INVOCATION_ID:-} ]]; then
+  printf 'Start MCP through systemctl --user start onepve-agent-mcp.service, not this launcher directly.\n' >&2
+  exit 1
+fi
+
+# The check is duplicated here so direct execution has the same persistent gate.
+mcp_permitted || { printf 'Manual takeover is active.\n' >&2; exit 1; }
+for attempt in {1..60}; do
+  mcp_permitted || exit 1
+  if curl --fail --silent --max-time 2 http://127.0.0.1:9222/json/version >/dev/null; then
+    break
+  fi
+  sleep 1
+done
+curl --fail --silent --max-time 2 http://127.0.0.1:9222/json/version >/dev/null
+mcp_permitted || exit 1
+cd "$AGENT_HOME/.local/share/onepve-agent/mcp"
+
+# Attached CDP browser belongs to onepve-agent-chromium.service, never this one.
+# The fixed package CLI is used rather than npx@latest at service start.
+exec "$FNM_BIN" --fnm-dir "$FNM_DIR" exec --using="$NODE_VERSION_FILE" \
+  node "$MCP_CLI" \
+  --host 127.0.0.1 --port 8931 \
+  --allowed-hosts 127.0.0.1:8931,localhost:8931,127.0.0.1:18931,localhost:18931 \
+  --cdp-endpoint http://127.0.0.1:9222 \
+  --output-dir "$AGENT_HOME/Downloads/onepve-agent" \
+  --shared-browser-context --idle-timeout 0

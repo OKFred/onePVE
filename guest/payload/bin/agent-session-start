@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+set -euo pipefail
+source /opt/onepve-agent/bin/common.sh
+require_x11
+export XAUTHORITY="${XAUTHORITY:-$AGENT_HOME/.Xauthority}"
+if [[ ! -r "$XAUTHORITY" ]]; then
+  printf 'XAUTHORITY is not readable; use the current XFCE session environment.\n' >&2
+  exit 1
+fi
+
+# Every login imports the real LightDM/XFCE display; never guess :0 or create :1.
+session_key="${XDG_SESSION_ID:-unknown}|$DISPLAY|$XAUTHORITY"
+previous=$(cat "$STATE_DIR/session-key" 2>/dev/null || true)
+if [[ -n $previous && $previous != "$session_key" ]]; then
+  systemctl --user stop onepve-agent-session.target
+fi
+export XDG_SESSION_TYPE=x11
+# im-config initializes these during the LightDM Xsession. Defaults also allow
+# invoking this bootstrap from an already open, previously unconfigured XFCE.
+export XMODIFIERS="${XMODIFIERS:-@im=ibus}"
+export GTK_IM_MODULE="${GTK_IM_MODULE:-ibus}"
+export QT_IM_MODULE="${QT_IM_MODULE:-ibus}"
+export CLUTTER_IM_MODULE="${CLUTTER_IM_MODULE:-ibus}"
+/opt/onepve-agent/bin/agent-input-start
+environment_names=(DISPLAY XAUTHORITY XDG_SESSION_TYPE XMODIFIERS GTK_IM_MODULE QT_IM_MODULE CLUTTER_IM_MODULE)
+for name in XDG_CURRENT_DESKTOP DBUS_SESSION_BUS_ADDRESS; do
+  if [[ -v $name ]]; then environment_names+=("$name"); fi
+done
+systemctl --user import-environment "${environment_names[@]}"
+dbus-update-activation-environment --systemd "${environment_names[@]}"
+printf '%s\n' "$session_key" > "$STATE_DIR/session-key"
+
+# This helper also persists the actual output's Xfce Default profile, avoiding
+# a later xfsettingsd startup pass restoring the old preferred resolution.
+/opt/onepve-agent/bin/agent-display-setup || printf 'Display setup did not complete; continuing the working session.\n' >&2
+
+# Dedicated VM desktop: keep this working session available during observation.
+xset s off || true
+xset s noblank || true
+xset -dpms || true
+xfconf-query -c xfce4-power-manager -p /xfce4-power-manager/presentation-mode -n -t bool -s true >/dev/null 2>&1 || true
+systemctl --user daemon-reload
+systemctl --user start onepve-agent-session.target
+notify_desktop 'Working desktop ready. Use Take over before manual browser input.'

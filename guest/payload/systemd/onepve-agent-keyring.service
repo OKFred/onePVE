@@ -1,0 +1,11 @@
+[Unit]
+Description=Unlock the dedicated empty-password keyring on the normal user bus
+PartOf=onepve-agent-session.target
+Before=onepve-agent-chromium.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecCondition=/usr/bin/test -f /etc/onepve-agent/empty-keyring
+ExecStart=/opt/onepve-agent/bin/agent-keyring-start
+TimeoutStartSec=20

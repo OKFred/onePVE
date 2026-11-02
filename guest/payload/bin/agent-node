@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+set -euo pipefail
+source /opt/onepve-agent/bin/common.sh
+exec "$FNM_BIN" --fnm-dir "$FNM_DIR" exec --using="$NODE_VERSION_FILE" "$@"

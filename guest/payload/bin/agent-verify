@@ -1,0 +1,183 @@
+#!/usr/bin/python3
+"""Read-only runtime evidence; --gpu adds an owned offscreen EGL probe."""
+import argparse
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import urllib.request
+sys.path.insert(0, '/opt/onepve-agent/share')
+from runtime_config import config, mode, process_argv
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--gpu', action='store_true')
+    args = parser.parse_args()
+    settings = config(); selected = mode(); home = settings['home']; uid = settings['uid']
+    if os.getuid() not in {0, uid}:
+        raise RuntimeError('Use guest root or the configured ordinary user')
+    env = dict(HOME=str(home), USER=settings['user'], LOGNAME=settings['user'], PATH='/usr/local/bin:/usr/bin:/bin',
+               XDG_RUNTIME_DIR='/run/user/' + str(uid), DBUS_SESSION_BUS_ADDRESS='unix:path=/run/user/' + str(uid) + '/bus')
+    prefix = ['/usr/sbin/runuser', '-u', settings['user'], '--'] if os.getuid() == 0 else []
+    def user(*command, check=True, timeout=45):
+        return subprocess.run(prefix + list(command), env=env, capture_output=True, text=True, check=check, timeout=timeout)
+    checks = []; report = {'status': 'NOT_VERIFIED', 'mode': selected['mode'], 'checks': checks, 'ui_input_issued': False}
+    def check(name, action):
+        try:
+            detail = action(); checks.append({'name': name, 'passed': True, 'detail': detail})
+        except Exception as error:
+            checks.append({'name': name, 'passed': False, 'error': str(error)})
+    pins = dict(x.split('=', 1) for x in Path('/etc/onepve-agent/versions.env').read_text().splitlines() if '=' in x)
+    def version():
+        actual = user('/opt/onepve-agent/bin/agent-node', 'node', '--version').stdout.strip()
+        assert actual == 'v' + pins['NODE_VERSION']
+        return actual
+    check('fnm Node exact version', version)
+    check('Codex CLI', lambda: user('/opt/onepve-agent/bin/agent-codex', '--version').stdout.strip())
+    marker = home / '.local/state/onepve-agent/manual.lock'
+    def services():
+        result = {}
+        for part in ['fixture', 'chromium', 'vnc', 'novnc', 'controls', 'mcp'] + (['wayland'] if selected['mode'] == 'wayland' else []):
+            name = 'onepve-agent-' + part + '.service'
+            raw = user('systemctl', '--user', 'show', name, '-p', 'ActiveState,MainPID').stdout
+            result[part] = dict(x.split('=', 1) for x in raw.splitlines() if '=' in x)
+            if part == 'mcp' and os.path.lexists(marker):
+                assert result[part]['ActiveState'] != 'active' and result[part]['MainPID'] == '0'
+            else:
+                assert result[part]['ActiveState'] == 'active' and result[part]['MainPID'] != '0', name
+        return result
+    check('owned services and persistent manual gate', services)
+    def listeners():
+        raw = subprocess.check_output(['ss', '-H', '-ltn'], text=True)
+        found = {}
+        for line in raw.splitlines():
+            address = line.split()[3]
+            if ':' not in address:
+                continue
+            host, port = address.rsplit(':', 1)
+            if port not in {'3000', '5900', '6080', '8931', '9222'}:
+                continue
+            assert host in {'127.0.0.1', '[::1]', '::1'}, 'Non-loopback managed listener: ' + address
+            found.setdefault(port, []).append(host)
+        expected = {'3000', '5900', '6080', '9222'} | (set() if os.path.lexists(marker) else {'8931'})
+        assert expected <= found.keys()
+        if os.path.lexists(marker):
+            assert '8931' not in found
+        return found
+    check('loopback listeners', listeners)
+    def viewer():
+        request = urllib.request.Request('http://127.0.0.1:6080/vnc.html', headers={'Host': '127.0.0.1:' + str(settings['viewer_port'])})
+        with urllib.request.urlopen(request, timeout=5) as response:
+            assert response.status == 200 and response.headers.get('X-Frame-Options') == 'DENY'
+            assert response.headers.get('Content-Security-Policy') == "frame-ancestors 'none'"
+            assert b'noVNC' in response.read()
+        return 'SSH viewer Host accepted; anti-framing headers present'
+    check('noVNC static page and headers', viewer)
+    def keyring():
+        owner = user('busctl', '--user', 'call', 'org.freedesktop.DBus', '/org/freedesktop/DBus',
+                     'org.freedesktop.DBus', 'GetNameOwner', 's', 'org.freedesktop.secrets').stdout.strip()
+        assert re.fullmatch(r's ":[0-9]+\.[0-9]+"', owner)
+        alias = user('busctl', '--user', 'call', 'org.freedesktop.secrets', '/org/freedesktop/secrets',
+                     'org.freedesktop.Secret.Service', 'ReadAlias', 's', 'default').stdout.strip()
+        collection = json.loads(alias[2:]); assert collection != '/'
+        locked = user('busctl', '--user', 'get-property', 'org.freedesktop.secrets', collection,
+                      'org.freedesktop.Secret.Collection', 'Locked').stdout.strip()
+        assert locked == 'b false', 'Default keyring is locked'
+        return {'normal_user_bus': True, 'default_collection_unlocked': True}
+    check('normal default keyring unlocked', keyring)
+    def browser():
+        with urllib.request.urlopen('http://127.0.0.1:9222/json/version', timeout=5) as response:
+            document = json.load(response)
+        assert document['webSocketDebuggerUrl'].startswith('ws://127.0.0.1:9222/')
+        profile = str(home / '.local/share/onepve-agent/chromium')
+        processes = []
+        for path in Path('/proc').iterdir():
+            if not path.name.isdecimal():
+                continue
+            try:
+                argv = process_argv(path)
+                if ('--user-data-dir=' + profile).encode() in argv and not any(x.startswith(b'--type=') for x in argv):
+                    assert path.stat().st_uid == uid and os.readlink(path / 'exe') == '/usr/lib/chromium/chromium'
+                    assert b'--no-sandbox' not in argv and b'--password-store=basic' not in argv
+                    processes.append(int(path.name))
+            except (FileNotFoundError, ProcessLookupError):
+                pass
+        assert len(processes) == 1
+        report['browser_pid'] = processes[0]
+        return {'product': document['Browser'], 'pid': processes[0], 'dedicated_profile': True, 'sandbox_flags_unchanged': True}
+    check('Chromium owner profile and sandbox flags', browser)
+    if args.gpu:
+        def cdp_gpu():
+            result = user('/opt/onepve-agent/bin/agent-node', 'node', '/opt/onepve-agent/share/cdp-status.mjs')
+            data = json.loads(result.stdout)
+            expected = int((Path('/sys/bus/pci/devices') / selected['gpu_bdf'] / 'device').read_text().strip(), 16)
+            assert any(x['vendorId'] == 0x8086 and x['deviceId'] == expected for x in data['devices'])
+            assert 'intel' in data.get('renderer', '').lower()
+            assert not re.search('llvmpipe|softpipe|swiftshader|lavapipe|software', data['renderer'], re.I)
+            assert all(str(data['featureStatus'].get(x, '')).startswith('enabled') for x in ['gpu_compositing', 'webgl'])
+            report['cdp_gpu'] = data
+            return data
+        check('CDP Intel hardware compositing and WebGL', cdp_gpu)
+        def egl():
+            assert selected['mode'] == 'wayland'
+            result = user('/usr/bin/python3', '/opt/onepve-agent/share/native_egl.py', timeout=40)
+            data = json.loads(result.stdout); assert data['status'] == 'PASS_INTEL_EGL_SHADER'
+            report['native_egl'] = data
+            return 'Exact Intel EGLDevice shader/readPixels passed'
+        check('native Intel EGL shader', egl)
+        def compositor():
+            result = user('/usr/bin/python3', '/opt/onepve-agent/share/wayland-session.py', 'ready', '--wait', '5')
+            data = json.loads(result.stdout); assert data['status'] == 'WAYLAND_INTEL_READY'
+            report['compositor'] = {k: data[k] for k in ['sway_pid', 'sway_renderer', 'render_node', 'guest_vf_bdf']}
+            return report['compositor']
+        check('native Wayland exact Intel FD', compositor)
+        def gpu_fds():
+            browser_pid = report['browser_pid']; target = selected['gpu_bdf']; result = []; renderer_seccomp = []
+            def parent(pid):
+                return int(re.search(r'^PPid:\s+(\d+)', Path('/proc', str(pid), 'status').read_text(), re.M)[1])
+            for process in Path('/proc').iterdir():
+                if not process.name.isdecimal():
+                    continue
+                try:
+                    if process.stat().st_uid != uid:
+                        continue
+                    argv = process_argv(process)
+                    if b'--type=gpu-process' not in argv and b'--type=renderer' not in argv:
+                        continue
+                    current = int(process.name); ancestry = []
+                    for _ in range(16):
+                        ancestry.append(current)
+                        if current in {0, 1, browser_pid}:
+                            break
+                        current = parent(current)
+                    if browser_pid not in ancestry:
+                        continue
+                    status = dict(x.split(':', 1) for x in (process / 'status').read_text().splitlines() if ':' in x)
+                    if b'--type=renderer' in argv:
+                        assert status['Seccomp'].strip() == '2'; renderer_seccomp.append(int(process.name)); continue
+                    for fd in (process / 'fd').iterdir():
+                        try:
+                            node = os.readlink(fd)
+                            if re.fullmatch(r'/dev/dri/renderD\d+', node) and (Path('/sys/class/drm') / Path(node).name / 'device').resolve().name == target:
+                                result.append({'gpu_pid': int(process.name), 'fd': fd.name, 'node': node, 'bdf': target,
+                                               'no_new_privs': status['NoNewPrivs'].strip(), 'cap_eff': status['CapEff'].strip()})
+                        except FileNotFoundError:
+                            pass
+                except (FileNotFoundError, ProcessLookupError):
+                    pass
+            assert result and renderer_seccomp, 'Require exact Chromium GPU FD and renderer Seccomp2'
+            report['chromium_gpu'] = result
+            return {'exact_gpu_fds': result, 'seccomp2_renderers': renderer_seccomp, 'gpu_full_sandbox_claimed': False}
+        check('Chromium exact VF FD and renderer Seccomp2', gpu_fds)
+    report['status'] = 'PASS_GPU_RUNTIME' if args.gpu else 'PASS_BASE_RUNTIME'
+    if any(not x['passed'] for x in checks):
+        report['status'] = 'NOT_VERIFIED'
+    print(json.dumps(report, ensure_ascii=False))
+    return 0 if report['status'].startswith('PASS_') else 2
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

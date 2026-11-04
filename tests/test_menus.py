@@ -71,6 +71,41 @@ class MenuTests(unittest.TestCase):
                 + 'onepve_agent_resources() { printf "%s\\n" ' + shlex.quote(json.dumps(RESOURCE)) + '; }\n'
                 + self.mock_cli() + 'onepve_agent_wizard ' + action)
 
+    def discovery(self, datasets, probes=None, failures=None):
+        log = self.root / 'discovery-calls.jsonl'
+        body = ('import fnmatch,json,subprocess\nfrom pathlib import Path\n'
+                'DATA=' + repr(datasets) + '\nPROBES=' + repr(probes or {})
+                + '\nFAILURES=' + repr(failures or {}) + '\nLOG=Path(' + repr(str(log)) + ')\n'
+                'def output(args,**kwargs):\n'
+                ' with LOG.open("a",encoding="utf-8") as stream:stream.write(json.dumps(args)+"\\n")\n'
+                ' if args[0]=="pvesh":\n'
+                '  assert args[1]=="get" and args[3:]==["--output-format","json"],args\n'
+                '  key=args[2]\n'
+                '  if key in DATA:value=DATA[key]\n'
+                '  else:value=next(value for pattern,value in DATA.items() if fnmatch.fnmatchcase(key,pattern))\n'
+                ' elif args[0]=="findmnt":\n'
+                '  assert "--json" in args and "--target" in args,args\n'
+                '  key="findmnt:"+args[args.index("--target")+1];value=PROBES[key]\n'
+                ' elif args[0]=="lsblk":\n'
+                '  assert all(flag in args for flag in ["--json","--inverse","--tree"]),args\n'
+                '  key="lsblk:"+args[-1];value=PROBES[key]\n'
+                ' elif args[0]=="pvs":\n'
+                '  assert "--reportformat" in args and "json" in args,args\n'
+                '  key="pvs";value=PROBES[key]\n'
+                ' else:raise AssertionError("Unexpected/non-read-only command: "+repr(args))\n'
+                ' failure=FAILURES.get(key)\n'
+                ' if failure=="missing":raise FileNotFoundError(key)\n'
+                ' if failure=="timeout":raise subprocess.TimeoutExpired(args,1)\n'
+                ' if failure=="invalid":return "invalid JSON"\n'
+                ' return json.dumps(value)\n'
+                'def run(args,**kwargs):return subprocess.CompletedProcess(args,0,output(args,**kwargs),"")\n'
+                'subprocess.check_output=output\nsubprocess.run=run\n')
+        (self.root / 'sitecustomize.py').write_text(body, encoding='utf-8')
+        self.env['PYTHONPATH'] = str(self.root)
+        result = self.shell(self.source('components/the_agent_workstation.sh') + 'onepve_agent_resources')
+        calls = [json.loads(line) for line in log.read_text(encoding='utf-8').splitlines()]
+        return json.loads(result.stdout), calls
+
     @staticmethod
     def calls(output):
         return [line.split('\t')[1:] for line in output.splitlines() if line.startswith('CLI\t')]
@@ -315,25 +350,103 @@ class MenuTests(unittest.TestCase):
 
     def test_discovery_only_reads_pve_and_filters_resources(self):
         datasets = {
+            '/storage': [],
             '*/storage': [{'storage': 'readonly-backups', 'type': 'dir', 'content': 'backup', 'active': 1},
                           {'storage': 'available-images', 'type': 'dir', 'content': 'images,snippets', 'active': 1, 'avail': 500}],
             '*/network': [{'iface': 'br-off', 'type': 'bridge', 'active': 0}, {'iface': 'br-ok', 'type': 'bridge', 'active': 1}],
             '/cluster/nextid': 241,
         }
-        body = ('import fnmatch,json,subprocess\nDATA=' + repr(datasets) + '\n'
-                'def output(args,**kwargs):\n'
-                ' assert args[0:2]==["pvesh","get"] and args[3:]==["--output-format","json"]\n'
-                ' for pattern,value in DATA.items():\n'
-                '  if fnmatch.fnmatchcase(args[2],pattern):return json.dumps(value)\n'
-                ' raise AssertionError(args)\n'
-                'subprocess.check_output=output\n')
-        (self.root / 'sitecustomize.py').write_text(body, encoding='utf-8')
-        self.env['PYTHONPATH'] = str(self.root)
-        result = self.shell(self.source('components/the_agent_workstation.sh') + 'onepve_agent_resources')
-        data = json.loads(result.stdout)
+        data, _ = self.discovery(datasets)
         self.assertEqual(data['nextid'], 241)
         self.assertEqual([x['storage'] for x in data['storages']], ['available-images'])
         self.assertEqual([x['iface'] for x in data['bridges']], ['br-ok'])
+
+    @staticmethod
+    def storage_fixture():
+        disks = [{'path': '/dev/nvme0n1', 'type': 'disk', 'model': 'Disk One', 'size': 500 * 1024**3},
+                 {'path': '/dev/nvme1n1', 'type': 'disk', 'model': 'Disk Two', 'size': 1000 * 1024**3}]
+        parts = [{'path': disk['path'] + 'p3', 'type': 'part', 'children': [disk]} for disk in disks]
+        datasets = {
+            '/storage': [{'storage': 'agent-browser', 'path': '/var/lib/agent-browser-storage',
+                          'password': 'TEST_SECRET_PASSWORD', 'encryption-key': 'TEST_SECRET_KEY'},
+                         {'storage': 'thin-images', 'vgname': 'pve', 'thinpool': 'data'}],
+            '*/storage': [{'storage': 'thin-images', 'type': 'lvmthin', 'content': 'images', 'active': 1, 'avail': 500},
+                          {'storage': 'agent-browser', 'type': 'dir', 'content': 'images,snippets', 'active': 1, 'avail': 600}],
+            '*/network': [{'iface': 'br-test', 'type': 'bridge', 'active': 1}],
+            '/cluster/nextid': 219,
+        }
+        probes = {
+            'findmnt:/var/lib/agent-browser-storage': {'filesystems': [
+                {'target': '/', 'source': '/dev/mapper/pve-root', 'fstype': 'ext4'}]},
+            'lsblk:/dev/mapper/pve-root': {'blockdevices': [
+                {'path': '/dev/mapper/pve-root', 'type': 'lvm', 'children': parts}]},
+            'pvs': {'report': [{'pv': [{'vg_name': 'pve', 'pv_name': part['path']} for part in parts]
+                                   + [{'vg_name': 'other-vg', 'pv_name': '/dev/unrelated'}]}]},
+        }
+        probes.update({'lsblk:' + part['path']: {'blockdevices': [part]} for part in parts})
+        return datasets, probes
+
+    def test_storage_discovery_tracks_all_directory_and_lvm_disks_without_secrets(self):
+        datasets, probes = self.storage_fixture()
+        data, calls = self.discovery(datasets, probes)
+        self.assertEqual([s['storage'] for s in data['storages']], ['agent-browser', 'thin-images'])
+        directory, thin = [s['location'] for s in data['storages']]
+        self.assertEqual(directory['path'], '/var/lib/agent-browser-storage')
+        self.assertEqual(directory['mount'], {'target': '/', 'source': '/dev/mapper/pve-root', 'fstype': 'ext4'})
+        self.assertEqual((thin['vgname'], thin['thinpool']), ('pve', 'data'))
+        for location in (directory, thin):
+            self.assertEqual({d['path'] for d in location['disks']}, {'/dev/nvme0n1', '/dev/nvme1n1'})
+            self.assertEqual({d['model'] for d in location['disks']}, {'Disk One', 'Disk Two'})
+        self.assertNotIn('TEST_SECRET', json.dumps(data))
+        self.assertEqual(sum(args[:3] == ['pvesh', 'get', '/storage'] for args in calls), 1)
+        self.assertEqual(sum(args[0] == 'pvs' for args in calls), 1)
+        self.assertFalse(any('/dev/unrelated' in args for args in calls))
+        code = (self.source('components/the_agent_workstation.sh')
+                + 'onepve_agent_resources() { printf "%s\\n" ' + shlex.quote(json.dumps(data)) + '; }\n'
+                + self.mock_cli() + 'onepve_agent_wizard create')
+        result = self.shell(code, self.form())
+        for text in ['/var/lib/agent-browser-storage', '/dev/mapper/pve-root', 'ext4',
+                     '/dev/nvme0n1', '/dev/nvme1n1', 'Disk One', 'Disk Two', '根文件系统', 'pve', 'data']:
+            self.assertIn(text, result.stdout)
+        self.assertLess(result.stdout.index('根文件系统'), result.stdout.index('CLI\t'))
+
+    def test_network_and_zfs_storage_do_not_guess_local_physical_disks(self):
+        datasets = {
+            '/storage': [{'storage': 'remote', 'path': '/mnt/pve/remote', 'server': '192.0.2.8', 'export': '/images'},
+                         {'storage': 'pool-images', 'pool': 'tank/data'}],
+            '*/storage': [{'storage': 'remote', 'type': 'nfs', 'content': 'images', 'active': 1, 'avail': 600},
+                          {'storage': 'pool-images', 'type': 'zfspool', 'content': 'images', 'active': 1, 'avail': 500}],
+            '*/network': [{'iface': 'br-test', 'type': 'bridge', 'active': 1}], '/cluster/nextid': 219,
+        }
+        probes = {'findmnt:/mnt/pve/remote': {'filesystems': [
+            {'target': '/mnt/pve/remote', 'source': '192.0.2.8:/images', 'fstype': 'nfs4'}]}}
+        data, calls = self.discovery(datasets, probes)
+        remote, pool = [s['location'] for s in data['storages']]
+        self.assertEqual((remote['server'], remote['export']), ('192.0.2.8', '/images'))
+        self.assertEqual(remote['mount']['source'], '192.0.2.8:/images')
+        self.assertEqual(pool['pool'], 'tank/data')
+        self.assertEqual(remote['disks'], [])
+        self.assertEqual(pool['disks'], [])
+        self.assertFalse(any(args[0] in ('lsblk', 'pvs') for args in calls))
+
+    def test_optional_storage_probes_fail_without_blocking_selection(self):
+        failures = [('/storage', 'missing'), ('findmnt:/var/lib/agent-browser-storage', 'missing'),
+                    ('findmnt:/var/lib/agent-browser-storage', 'timeout'),
+                    ('findmnt:/var/lib/agent-browser-storage', 'invalid'),
+                    ('lsblk:/dev/mapper/pve-root', 'invalid'), ('pvs', 'invalid')]
+        for key, failure in failures:
+            with self.subTest(key=key, failure=failure):
+                datasets, probes = self.storage_fixture()
+                data, _ = self.discovery(datasets, probes, {key: failure})
+                self.assertEqual([s['storage'] for s in data['storages']], ['agent-browser', 'thin-images'])
+                self.assertEqual(data['nextid'], 219)
+        for key, value in [('pvs', {'report': [None]}),
+                           ('lsblk:/dev/mapper/pve-root', {'blockdevices': [{'children': 7}]})]:
+            with self.subTest(key=key, malformed=value):
+                datasets, probes = self.storage_fixture()
+                probes[key] = value
+                data, _ = self.discovery(datasets, probes)
+                self.assertEqual([s['storage'] for s in data['storages']], ['agent-browser', 'thin-images'])
 
 
 if __name__ == '__main__':

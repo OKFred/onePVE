@@ -78,6 +78,27 @@ class ArtifactTests(unittest.TestCase):
         self.assertEqual(path.read_bytes(), data)
         self.assertEqual(list(path.parent.glob('*.part*')), [])
 
+    def test_download_and_cache_progress_show_expected_and_actual_sizes(self):
+        data = b'x' * 1024; path = self.root / 'downloads/item'
+        response = io.BytesIO(data); response.headers = {'Content-Length': str(len(data))}
+        with mock.patch.object(artifacts, '_open_url', return_value=response), \
+             mock.patch.object(artifacts, 'progress') as report:
+            artifacts.download_verified('https://example.test/item', path, hashlib.sha256(data).hexdigest())
+        self.assertIn(mock.call('下载并校验文件：item', '预计大小：0.0 MiB (1024 字节)'), report.call_args_list)
+        self.assertIn(mock.call('下载校验完成：item', '文件大小：0.0 MiB (1024 字节)'), report.call_args_list)
+        with mock.patch.object(artifacts, '_open_url', side_effect=AssertionError('network')), \
+             mock.patch.object(artifacts, 'progress') as report:
+            artifacts.download_verified('https://example.test/item', path, hashlib.sha256(data).hexdigest())
+        report.assert_called_once_with('校验已缓存文件：item', '文件大小：0.0 MiB (1024 字节)')
+
+    def test_unknown_download_size_still_reports_actual_size(self):
+        data = b'valid'; path = self.root / 'item'
+        with mock.patch.object(artifacts, '_open_url', return_value=io.BytesIO(data)), \
+             mock.patch.object(artifacts, 'progress') as report:
+            artifacts.download_verified('https://example.test/item', path, hashlib.sha256(data).hexdigest())
+        self.assertIn(mock.call('下载并校验文件：item', '预计大小：未知'), report.call_args_list)
+        self.assertIn(mock.call('下载校验完成：item', '文件大小：0.0 MiB (5 字节)'), report.call_args_list)
+
     def test_existing_bad_cache_is_not_overwritten(self):
         path = self.root / 'item'; path.write_bytes(b'old evidence')
         with mock.patch.object(artifacts, '_open_url') as network:

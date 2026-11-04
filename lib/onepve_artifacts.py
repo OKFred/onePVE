@@ -6,6 +6,7 @@ try:
 except ImportError:
     fcntl = None
 import hashlib
+import http.client
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -15,6 +16,7 @@ import re
 import shutil
 import stat
 import struct
+import sys
 import tarfile
 import tempfile
 import urllib.parse
@@ -85,14 +87,145 @@ def resolve_image():
         version = data['items'][0]['data']['info']['version']
     except (KeyError, IndexError, TypeError) as error:
         raise RuntimeError('Unexpected Debian generic image metadata') from error
+    image = _image_info(version)
+    image['sha512'] = _checksum(_metadata(image['checksum_url']), image['filename'], 'sha512')
+    return image
+
+
+def _image_info(version):
     need(isinstance(version, str) and re.fullmatch(r'20[0-9]{6}-[0-9]+', version), 'Unexpected Debian image build ID')
     datetime.datetime.strptime(version[:8], '%Y%m%d')
     filename = 'debian-13-generic-amd64-' + version + '.qcow2'
     base = CLOUD_ROOT + version + '/'
     checksum_url = base + 'SHA512SUMS'
-    digest = _checksum(_metadata(checksum_url), filename, 'sha512')
     return dict(version=version, filename=filename, url=base + filename,
-                sha512=digest, metadata_url=metadata_url, checksum_url=checksum_url)
+                metadata_url=CLOUD_ROOT + 'latest/debian-13-generic-amd64.json', checksum_url=checksum_url)
+
+
+def _format_size(size):
+    return '未知' if size is None else '%.1f MiB (%d 字节)' % (size / 1024**2, size)
+
+
+def _cached_images(latest):
+    images, errors = [], []
+    directory = CACHE_ROOT / 'images'
+    if not os.path.lexists(directory):
+        return images, errors
+    try:
+        need(directory.is_dir() and directory.resolve() == directory.absolute(), 'Image cache directory is redirected')
+        if os.name == 'posix':
+            for parent in [CACHE_ROOT, directory]:
+                need(parent.stat().st_uid == os.geteuid() and not parent.stat().st_mode & 0o022,
+                     'Image cache directory is not privately owned')
+    except (RuntimeError, OSError) as error:
+        return [], [str(error)]
+    for path in sorted(directory.glob('debian-13-generic-amd64-*.qcow2'), reverse=True):
+        try:
+            need(path.is_file() and not path.is_symlink(), 'Image cache must be a regular file')
+            version = path.name.removeprefix('debian-13-generic-amd64-').removesuffix('.qcow2')
+            image = _image_info(version)
+            progress('校验本地 Debian 镜像：' + path.name, '文件大小：' + _format_size(path.stat().st_size))
+            actual = _digest(path, 'sha512')
+            if latest and latest['filename'] == path.name:
+                recorded = latest
+            else:
+                recorded = None
+                for record in [path.with_suffix(path.suffix + '.json'), CACHE_ROOT / 'prepared.json']:
+                    if not record.exists():
+                        continue
+                    try:
+                        need(record.is_file() and not record.is_symlink(), 'Image checksum record is redirected')
+                        if os.name == 'posix':
+                            need(record.stat().st_uid == os.geteuid() and not record.stat().st_mode & 0o022,
+                                 'Image checksum record is not privately owned')
+                        data = json.loads(record.read_text(encoding='utf-8'))
+                        need(isinstance(data, dict), 'Image checksum record must be an object')
+                        data = data.get('image', data)
+                        need(isinstance(data, dict), 'Image checksum record must contain an image object')
+                        if data.get('filename') != path.name:
+                            continue
+                        need(all(data.get(key) == image[key] for key in ['version', 'filename', 'url', 'checksum_url']),
+                             'Image checksum record does not match the official build URL')
+                        need(isinstance(data.get('sha512'), str) and re.fullmatch(r'[0-9a-f]{128}', data['sha512']),
+                             'Image has no trusted SHA512 checksum')
+                        need(data['sha512'] == actual, 'Cached Debian image checksum differs')
+                        recorded = data
+                        break
+                    except (RuntimeError, OSError, ValueError) as error:
+                        errors.append(record.name + ': ' + str(error))
+                if recorded is None:
+                    image['sha512'] = _checksum(_metadata(image['checksum_url']), path.name, 'sha512')
+                    recorded = image
+            need(all(recorded.get(key) == image[key] for key in ['version', 'filename', 'url', 'checksum_url']),
+                 'Image checksum record does not match the official build URL')
+            digest = recorded.get('sha512')
+            need(isinstance(digest, str) and re.fullmatch(r'[0-9a-f]{128}', digest), 'Image has no trusted SHA512 checksum')
+            need(actual == digest, 'Cached Debian image checksum differs')
+            images.append(dict(image, sha512=digest, path=str(path), size_bytes=path.stat().st_size))
+        except (RuntimeError, OSError, ValueError, http.client.HTTPException) as error:
+            errors.append(path.name + ': ' + str(error))
+    images.sort(key=lambda image: tuple(map(int, image['version'].split('-'))), reverse=True)
+    return images, errors
+
+
+def image_options():
+    """Read-only discovery: online failure must not bypass the local cache."""
+    progress('读取 Debian 镜像版本和官方校验信息')
+    latest, lookup_error = None, None
+    try:
+        latest = resolve_image()
+    except (RuntimeError, OSError, ValueError, http.client.HTTPException) as error:
+        lookup_error = str(error)
+        progress('在线镜像查询失败，继续检查本地镜像', lookup_error)
+    cached, errors = _cached_images(latest)
+    need(latest or cached, '线上与本地均无可用 Debian 镜像；在线：' + str(lookup_error)
+         + '；本地：' + ('; '.join(errors) or '未找到已校验镜像'))
+    return dict(latest=latest, cached=cached, lookup_error=lookup_error, cache_errors=errors)
+
+
+def _choose_image(options):
+    latest, cached = options['latest'], options['cached']
+    for image in cached:
+        if latest and (image['filename'], image['sha512']) == (latest['filename'], latest['sha512']):
+            progress('复用已校验的最新 Debian 镜像：' + image['filename'], '文件大小：' + _format_size(image['size_bytes']))
+            return image
+    if options['lookup_error']:
+        print('【镜像提示】无法确认线上最新版：' + options['lookup_error'], file=sys.stderr, flush=True)
+    for error in options['cache_errors']:
+        print('【镜像提示】跳过不可用缓存：' + error, file=sys.stderr, flush=True)
+    if cached:
+        print('【本地镜像】已有构建可能不是最新版；' + ('线上最新版：' + latest['version'] if latest else '当前无法确认最新版'), file=sys.stderr)
+        for number, image in enumerate(cached, 1):
+            print('%d. %s | %s | %s' % (number, image['version'], _format_size(image['size_bytes']), image['path']), file=sys.stderr)
+        while True:
+            print('输入序号复用已有镜像，或回车' + ('下载最新版' if latest else '取消') + '：', end='', file=sys.stderr, flush=True)
+            answer = sys.stdin.readline().strip()
+            if not answer:
+                need(latest, '已取消：未选择本地镜像，线上镜像不可用')
+                break
+            if answer.isdecimal() and 1 <= int(answer) <= len(cached):
+                return cached[int(answer) - 1]
+            print('请输入列表中的序号。', file=sys.stderr)
+    return latest
+
+
+def prepare_image():
+    options = image_options()
+    image = _choose_image(options)
+    target = CACHE_ROOT / 'images' / image['filename']
+    try:
+        download_verified(image['url'], target, image['sha512'], 'sha512')
+    except (RuntimeError, OSError, ValueError, http.client.HTTPException) as error:
+        cached, errors = _cached_images(options['latest'])
+        cached = [item for item in cached if item['filename'] != image['filename']]
+        need(cached, '镜像准备失败，且没有其他可用本地镜像：' + str(error) + '; ' + '; '.join(errors))
+        image = _choose_image(dict(latest=None, cached=cached, lookup_error='镜像下载／校验失败：' + str(error), cache_errors=errors))
+        target = CACHE_ROOT / 'images' / image['filename']
+        download_verified(image['url'], target, image['sha512'], 'sha512')
+    image = dict(image, path=str(target), size_bytes=target.stat().st_size)
+    # Save immediately: later runtime failures must not strand a verified image offline.
+    atomic_json(target.with_suffix(target.suffix + '.json'), image)
+    return image
 
 
 def _private_dir(path):
@@ -122,7 +255,7 @@ def _download(url, path, expected, algorithm, before_commit=None):
     path = Path(path).absolute()
     need(path.parent.resolve() == path.parent, 'Artifact path has a redirected parent')
     if os.path.lexists(path):
-        progress('校验已缓存文件：' + path.name)
+        progress('校验已缓存文件：' + path.name, '文件大小：' + _format_size(path.stat().st_size))
         need(expected is not None and _digest(path, algorithm) == expected,
              'Existing artifact differs or has no trusted digest; it was not overwritten: ' + str(path))
         return path
@@ -133,6 +266,9 @@ def _download(url, path, expected, algorithm, before_commit=None):
     digest, count = hashlib.new(algorithm), 0
     try:
         with os.fdopen(descriptor, 'wb') as output, _open_url(url) as response:
+            length = response.headers.get('Content-Length') if hasattr(response, 'headers') else None
+            size = int(length) if length and re.fullmatch(r'[0-9]+', length) else None
+            progress('下载并校验文件：' + path.name, '预计大小：' + _format_size(size))
             while block := response.read(1024 * 1024):
                 count += len(block)
                 need(count <= MAX_DOWNLOAD_BYTES, 'Artifact exceeds the download size limit')
@@ -148,6 +284,7 @@ def _download(url, path, expected, algorithm, before_commit=None):
             os.link(part, path)
         except FileExistsError:
             need(_digest(path, algorithm) == actual, 'Artifact appeared with different content; not overwritten')
+        progress('下载校验完成：' + path.name, '文件大小：' + _format_size(count))
         return path
     finally:
         part.unlink(missing_ok=True)
@@ -356,16 +493,14 @@ def prepare_artifacts():
     """Prepare every non-apt input before the caller deletes/rebuilds a VM."""
     need(platform.system() == 'Linux' and platform.machine() in {'x86_64', 'amd64'},
          'Runtime cache preparation requires the x86-64 Linux PVE host')
-    progress('读取 Debian 镜像版本和官方校验信息')
-    image = resolve_image()
     _private_dir(CACHE_ROOT)
     lock_path = CACHE_ROOT / 'prepare.lock'
     need(not lock_path.is_symlink(), 'Refusing redirected cache lock')
     with lock_path.open('a') as lock:
         if fcntl:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        target = CACHE_ROOT / 'images' / image['filename']
-        download_verified(image['url'], target, image['sha512'], 'sha512')
+        image = prepare_image()
+        target = Path(image['path'])
         spec = driver_spec('6.12.113+deb13-amd64')
         source = CACHE_ROOT / 'drivers' / ('i915-sriov-dkms-' + spec['version'] + '.tar.gz')
         download_verified(spec['url'], source, spec['sha256'])

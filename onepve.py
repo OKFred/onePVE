@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """CLI shared by the PVE menus; importing it never applies configuration."""
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -24,7 +25,10 @@ def main(argv=None):
             raise ValueError('Choose gpu or agent')
         return entry(argv[1:]) or 0
     except (RuntimeError, ValueError, OSError, TimeoutError, subprocess.SubprocessError) as error:
-        print(json.dumps({'status': 'ERROR', 'error': str(error)}, ensure_ascii=False), file=sys.stderr)
+        menu = os.environ.get('ONEPVE_MENU_ERRORS') == '1'
+        print(json.dumps({'status': 'ERROR', 'error': str(error)}, ensure_ascii=False), file=sys.stdout if menu else sys.stderr)
+        if menu:
+            print('onePVE: ' + str(error), file=sys.stderr)
         return 2
 
 

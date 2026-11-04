@@ -24,6 +24,7 @@ except ImportError:
 
 import onepve_artifacts as artifacts
 import onepve_gpu as gpu
+import onepve_driver_cache as driver_cache
 from onepve_common import (STATE_ROOT, Qga, atomic_json, node_name, pve_get,
                           progress, progress_session, repo_root, require_root, run, vm_config)
 
@@ -41,7 +42,7 @@ PHASE_LABELS = {
     'CLOUD_CONFIGURING': '配置 Cloud-init 和网络', 'CLOUD_WAIT': '等待 VM 启动和 Cloud-init 完成',
     'CLOUD_READY': 'Debian 基础系统已就绪', 'PAYLOAD_UPLOADING': '上传工作环境安装文件', 'PAYLOAD_READY': '安装文件已上传',
     'INSTALL_RUNNING': '安装桌面、浏览器和 Node.js', 'BASE_VERIFYING': '验证基础工作环境', 'BASE_READY': '基础工作环境已就绪',
-    'GUEST_DRIVER_RUNNING': '编译并安装客机核显驱动', 'GUEST_DRIVER_READY': '客机核显驱动已准备',
+    'GUEST_DRIVER_RUNNING': '准备客机核显驱动（优先复用缓存）', 'GUEST_DRIVER_READY': '客机核显驱动已准备',
     'GPU_ATTACHING': '接入已准备的显卡设备', 'GPU_BOOTING': '等待 GPU 模式重启', 'GPU_MODE_SWITCHING': '切换 Wayland 桌面',
     'GPU_VERIFYING': '验证原生 EGL 和浏览器硬件加速', 'READY_GPU': 'GPU 工作机验收完成', 'READY_SOFTWARE': '软件桌面工作机验收完成',
     'GPU_FALLBACK': 'GPU 验收未完成，正在恢复软件桌面', 'GPU_FAILED_SOFTWARE_READY': 'GPU 失败，软件桌面已恢复可用',
@@ -514,7 +515,7 @@ def _bundle(state):
         for source in sorted((root/'guest').rglob('*')):
             if source.is_file() and '__pycache__' not in source.parts and source.suffix!='.pyc':
                 stream.add(source,arcname='source/'+str(source.relative_to(root)).replace('\\','/'),recursive=False)
-        for name in ['onepve_common.py','onepve_gpu.py']:
+        for name in ['onepve_common.py','onepve_gpu.py','onepve_driver_cache.py']:
             stream.add(root/'lib'/name,arcname='source/lib/'+name,recursive=False)
         stream.add(runtime,arcname='cache',recursive=True)
         for version,source in state['artifacts']['driver_sources'].items():
@@ -641,7 +642,9 @@ def _driver_script(state):
     return """import sys,subprocess,json,hashlib,tarfile,os
 from pathlib import Path
 sys.path.insert(0,LIB)
+sys.path.insert(0,STAGE)
 import onepve_gpu as gpu
+import onepve_driver_cache as driver_cache
 spec=SPEC;kernel=os.uname().release
 assert kernel==spec['kernel'];assert kernel.startswith('6.12.')
 release=dict(line.split('=',1) for line in Path('/etc/os-release').read_text().splitlines() if '=' in line)
@@ -663,21 +666,9 @@ if not any(line.strip().startswith('Candidate:') and line.split(':',1)[1].strip(
  else:
   with os.fdopen(os.open(apt_source,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o644),'w') as stream:stream.write(apt_body)
 run('apt-get','update');run('apt-get','install','-y','--no-install-recommends','dkms','build-essential','linux-headers-'+kernel,'firmware-intel-graphics')
-registered=subprocess.run(['dkms','status','-m','i915-sriov-dkms','-v',spec['version']],capture_output=True,text=True)
-if not registered.stdout.strip():run('dkms','add','-m','i915-sriov-dkms','-v',spec['version'])
-names=['i915','xe','kvmgt','intel_sriov_compat']
-installed=all(subprocess.run(['modinfo','-k',kernel,'-F','version',name],capture_output=True,text=True).stdout.strip()==spec['version']+'-sriov' for name in names)
-build=Path('/var/lib/dkms/i915-sriov-dkms')/spec['version']/'build'
-if not installed:
- run('dkms','build','-m','i915-sriov-dkms','-v',spec['version'],'-k',kernel)
- modules=sorted((Path('/var/lib/dkms/i915-sriov-dkms')/spec['version']/kernel/os.uname().machine/'module').glob('*.ko*'))
- evidence=gpu._verify_built_modules(kernel,build,modules)
- Path('/var/lib/onepve-agent/driver-build.json').write_text(json.dumps({'spec':spec,'modules':evidence},indent=2))
- run('dkms','install','-m','i915-sriov-dkms','-v',spec['version'],'-k',kernel)
-else:
- modules=[Path(subprocess.check_output(['modinfo','-k',kernel,'-F','filename',name],text=True).strip()) for name in names]
- gpu._verify_built_modules(kernel,build,modules)
-for name in names:
+report=driver_cache.prepare(spec,source,Path(INCOMING),Path(STAGE)/'driver-cache-output.tar.gz')
+Path('/var/lib/onepve-agent/driver-build.json').write_text(json.dumps({'spec':spec,'modules':report.pop('modules')},indent=2))
+for name in sorted(driver_cache.MODULES):
  assert subprocess.check_output(['modinfo','-k',kernel,'-F','version',name],text=True).strip()==spec['version']+'-sriov'
  magic=subprocess.check_output(['modinfo','-k',kernel,'-F','vermagic',name],text=True);assert magic.split()[0]==kernel
 path=Path('/etc/modprobe.d/onepve-agent-gpu.conf')
@@ -685,8 +676,58 @@ body='options i915 enable_guc=3'+(' force_probe=7d67' if DEVICE=='0x7d67' else '
 if path.exists():assert path.read_text()==body
 else:path.write_text(body)
 run('update-initramfs','-u','-k',kernel)
+Path(STAGE+'/driver-cache-result.json').write_text(json.dumps(report))
 print(json.dumps({'status':'GUEST_DRIVER_READY','kernel':kernel,'version':spec['version']}))
-""".replace('LIB',repr(stage+'/source/lib')).replace('SPEC',repr(spec)).replace('ARCHIVE',repr(stage+'/drivers/'+spec['version']+'.tar.gz')).replace('DEVICE',repr(state['selected_gpu']['device']))
+""".replace('LIB',repr(stage+'/source/lib')).replace('SPEC',repr(spec)).replace('ARCHIVE',repr(stage+'/drivers/'+spec['version']+'.tar.gz')).replace('DEVICE',repr(state['selected_gpu']['device'])).replace('STAGE',repr(state['guest_stage'])).replace('INCOMING',repr(state.get('driver_cache_input',state['guest_stage']+'/no-driver-cache')))
+
+
+def _prepare_driver(state,retry=False):
+    job=state.get('jobs',{}).get('driver')
+    if job and job.get('result',{}).get('status')=='SUCCESS' and state.get('driver_spec'):
+        current=_guest(state,['/bin/uname','-r'],30)['stdout'].strip()
+        if current!=state['driver_spec']['kernel']:
+            state['jobs'].pop('driver');job=None
+            _save(state,driver_cache=dict(status='UNAVAILABLE',reason='Guest kernel changed; prepare a new driver job'))
+    # Existing persistent jobs own their script/cache inputs until they finish.
+    stage_new=not job or (retry and job.get('result',{}).get('status')=='FAILED')
+    stage=state['guest_stage'];path=stage+'/prepare-driver.py'
+    root=artifacts.CACHE_ROOT/'driver-binaries'
+    if stage_new:
+        kernel=_guest(state,['/bin/uname','-r'],30)['stdout'].strip();spec=gpu.driver_spec(kernel)
+        need(spec['version'] in state['artifacts']['driver_sources'],'Driver archive for actual guest kernel was not prepared before rebuild')
+        arch=_guest(state,['/bin/uname','-m'],30)['stdout'].strip()
+        state['driver_spec']=spec;state['guest_arch']=arch
+        state['driver_cache_input']=stage+'/driver-cache-input-'+uuid.uuid4().hex+'.tar.gz'
+        report=dict(status='UNAVAILABLE',reason='No matching compiled-driver cache',key=driver_cache.key(spec,arch))
+        _save(state,'GUEST_DRIVER_RUNNING',driver_cache=report)
+        with Qga(state['vmid']) as q:
+            # Also supplies the helper for resumable deployments staged by older versions.
+            q.write(stage+'/onepve_driver_cache.py',(repo_root()/'lib/onepve_driver_cache.py').read_bytes())
+            try:
+                data=driver_cache.load(root,spec,arch)
+                q.write(state['driver_cache_input'],data)
+                report.update(status='CANDIDATE',reason='Awaiting guest ABI/module checks',bytes=len(data),path=str(driver_cache.cache_path(root,spec,arch)))
+                progress('已找到客机驱动缓存，等待客机校验',str(len(data))+' 字节')
+            except (RuntimeError,OSError,ValueError,tarfile.TarError) as error:
+                report['reason']=str(error);progress('客机驱动缓存未命中，将按需编译',str(error))
+            q.write(path,_driver_script(state).encode())
+        _save(state,driver_cache=report)
+    _job(state,'driver',['/usr/bin/python3',path],retry_failed=retry)
+    try:
+        with Qga(state['vmid']) as q:
+            report=json.loads(q.read(stage+'/driver-cache-result.json',max_bytes=65536))
+            need(isinstance(report,dict) and report.get('status') in {'HIT','BUILT','INSTALLED'},'Invalid guest driver cache result')
+            state['driver_cache']=report
+            if report.get('exported'):
+                spec=state['driver_spec'];arch=state.get('guest_arch') or _guest(state,['/bin/uname','-m'],30)['stdout'].strip()
+                data=q.read(stage+'/driver-cache-output.tar.gz',max_bytes=driver_cache.MAX_ARCHIVE_BYTES)
+                target=driver_cache.store(root,spec,arch,data)
+                report.update(path=str(target),bytes=len(data),published=True)
+                progress('客机驱动编译产物已缓存',str(target)+' | '+str(len(data))+' 字节')
+    except (RuntimeError,OSError,ValueError,tarfile.TarError) as error:
+        state.setdefault('driver_cache',dict(status='UNAVAILABLE'))['publish_error']=str(error)
+        progress('驱动已安装；缓存保存不可用，不影响当前 VM',str(error))
+    _save(state,'GUEST_DRIVER_READY')
 
 
 def _gpu_hook(state):
@@ -775,13 +816,7 @@ def _continue(state,retry=False):
         if state['phase']=='GPU_FALLBACK':_fallback(state,state.get('gpu_error','Interrupted GPU fallback'));return state
         try:
             if state['phase'] in {'BASE_READY','GUEST_DRIVER_RUNNING'}:
-                kernel=_guest(state,['/bin/uname','-r'],30)['stdout'].strip();spec=gpu.driver_spec(kernel)
-                need(spec['version'] in state['artifacts']['driver_sources'],'Driver archive for actual guest kernel was not prepared before rebuild')
-                state['driver_spec']=spec;_save(state,'GUEST_DRIVER_RUNNING')
-                path=state['guest_stage']+'/prepare-driver.py'
-                with Qga(state['vmid']) as q:q.write(path,_driver_script(state).encode())
-                _job(state,'driver',['/usr/bin/python3',path],retry_failed=retry)
-                _save(state,'GUEST_DRIVER_READY')
+                _prepare_driver(state,retry)
             if state['phase'] in {'GUEST_DRIVER_READY','GPU_ATTACHING'}:
                 _save(state,'GPU_ATTACHING')
                 selected=gpu.validate_assignment(state['selected_gpu']['bdf'],state['vmid'])

@@ -185,13 +185,17 @@ class Qga:
             time.sleep(.25)
         raise TimeoutError('Guest command outcome uncertain; inspect before retrying, PID ' + str(pid))
 
-    def read(self, path):
+    def read(self, path, max_bytes=None):
         handle = self.call('guest-file-open', {'path': str(path), 'mode': 'rb'})
-        blocks = []
+        blocks, size = [], 0
         try:
             while True:
                 item = self.call('guest-file-read', {'handle': handle, 'count': 65536})
-                blocks.append(base64.b64decode(item.get('buf-b64', '')))
+                block = base64.b64decode(item.get('buf-b64', ''))
+                size += len(block)
+                if max_bytes is not None and size > max_bytes:
+                    raise RuntimeError('Guest file exceeds the read size limit: ' + str(path))
+                blocks.append(block)
                 if item.get('eof') or not item.get('count'):
                     return b''.join(blocks)
         finally:

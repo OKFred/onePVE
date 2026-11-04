@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 ONEPVE_ROOT="${ONEPVE_ROOT:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)}"
-if ! declare -F onepve_cli >/dev/null; then
+if ! declare -F onepve_menu_run >/dev/null; then
   source "$ONEPVE_ROOT/components/the_pass_through.sh"
 fi
 
@@ -227,15 +227,15 @@ PY
     argv+=(--address "$address" --gateway "$gateway" --nameserver "$nameserver")
   fi
   if [[ "$action" == rebuild ]]; then
-    onepve_cli agent rebuild "${argv[@]}" --confirm-vmid "$vmid" --dry-run || return
+    onepve_menu_run agent rebuild "${argv[@]}" --confirm-vmid "$vmid" --dry-run || return
     read -r -p "确认无备份删除并重建此VM，请输入VMID $vmid：" confirmation || return
     [[ "$confirmation" == "$vmid" ]] || { printf 'VMID不匹配，已取消。\n'; return 1; }
-    onepve_cli agent rebuild "${argv[@]}" --confirm-vmid "$vmid"
+    onepve_menu_run agent rebuild "${argv[@]}" --confirm-vmid "$vmid"
   else
-    onepve_cli agent plan "${argv[@]}" || return
+    onepve_menu_run agent plan "${argv[@]}" || return
     read -r -p '创建以上工作机？[y/N]：' answer || return
     [[ "$answer" == y || "$answer" == Y ]] || return 0
-    onepve_cli agent create "${argv[@]}"
+    onepve_menu_run agent create "${argv[@]}"
   fi
 }
 
@@ -249,14 +249,14 @@ the_agent_workstation() {
     read -r -p '选择：' choice || return
     case "$choice" in
       1) onepve_agent_wizard create ;;
-      2) onepve_cli agent status ;;
+      2) onepve_menu_run agent status ;;
       3 | 5)
         read -r -p 'VMID：' vmid || return
         onepve_agent_number "$vmid" 100 || { printf 'VMID无效。\n'; continue; }
         if [[ "$choice" == 3 ]]; then
-          onepve_cli agent verify --vmid "$vmid"
+          onepve_menu_run agent verify --vmid "$vmid"
         else
-          onepve_cli agent resume --vmid "$vmid"
+          onepve_menu_run agent resume --vmid "$vmid"
         fi
         ;;
       4) onepve_agent_wizard rebuild ;;

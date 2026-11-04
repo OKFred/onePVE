@@ -95,6 +95,20 @@ class AgentTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError,'already exists'):agent.create(config())
         prepare.assert_not_called();save.assert_not_called()
 
+    def test_storage_reserve_includes_guest_swap_without_changing_thick_disk_size(self):
+        for kind, minimum in [('dir', 24), ('lvmthin', 24), ('lvm', 34)]:
+            for available in [minimum - 1, minimum]:
+                storage=dict(storage='ai-dev',type=kind,active=1,content='images,snippets',avail=available*1024**3)
+                with self.subTest(kind=kind,available=available),mock.patch.object(agent,'node_name',return_value='pve'), \
+                     mock.patch.object(agent,'pve_get',side_effect=[[storage],[{'iface':'vmbr0','type':'bridge','active':1}]]):
+                    if available < minimum:
+                        with self.assertRaisesRegex(RuntimeError,'storage reserve'):agent._resources(config())
+                    else:self.assertEqual(agent._resources(config())['storage_type'],kind)
+
+    def test_new_cloud_vm_initializes_fixed_swap_before_guest_installation(self):
+        cloud=json.loads(agent._cloud_config(state()).split('\n',1)[1])
+        self.assertEqual(cloud['swap'],{'filename':'/var/lib/onepve-agent/swapfile','size':4*1024**3})
+
     def test_dry_run_has_zero_mutations_and_no_cache(self):
         with mock.patch.object(agent,'_exists',return_value=False),mock.patch.object(agent,'_resources',return_value={}), \
              mock.patch.object(agent.artifacts,'resolve_image',return_value={'sha512':'pinned'}),mock.patch.object(agent,'run') as run, \

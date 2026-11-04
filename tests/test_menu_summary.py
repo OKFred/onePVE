@@ -74,6 +74,20 @@ class MenuSummaryTests(unittest.TestCase):
         self.assertNotIn(':16080', output)
         self.assertIn('连接说明', output)
 
+    def test_swap_summary_uses_actual_runtime_in_verify_and_saved_state(self):
+        runtime = {'swap': {'total_mib': 4095, 'active_paths': ['/var/lib/onepve-agent/swapfile']}}
+        for data in [{'status': 'VERIFIED', 'runtime': runtime},
+                     {'phase': 'READY_SOFTWARE', 'verification': {'base': {'runtime': runtime}}}]:
+            with self.subTest(data=data):
+                code, output = self.summary(data)
+                self.assertEqual(code, 0)
+                self.assertIn('Swap 总量: 4.0 GiB', output)
+                self.assertIn('/var/lib/onepve-agent/swapfile', output)
+        code, output = self.summary({'status': 'VERIFIED', 'runtime': {'swap': {'total_mib': 0, 'active_paths': []}}})
+        self.assertEqual(code, 0)
+        self.assertIn('Swap 总量: 0.0 GiB', output)
+        self.assertIn('Swap 路径: 未启用', output)
+
     def test_nonzero_backend_cannot_show_gpu_ready(self):
         code, output = self.summary({'status':'READY'}, 'gpu', 'prepare-sriov', failed=True)
         self.assertEqual(code, 1)

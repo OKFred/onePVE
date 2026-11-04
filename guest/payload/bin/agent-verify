@@ -25,6 +25,9 @@ def main():
     def user(*command, check=True, timeout=45):
         return subprocess.run(prefix + list(command), env=env, capture_output=True, text=True, check=check, timeout=timeout)
     checks = []; report = {'status': 'NOT_VERIFIED', 'mode': selected['mode'], 'checks': checks, 'ui_input_issued': False}
+    memory = Path('/proc/meminfo').read_text()
+    report['swap'] = {'total_mib': int(re.search(r'SwapTotal:\s+(\d+)', memory)[1]) // 1024,
+                      'active_paths': [line.split()[0] for line in Path('/proc/swaps').read_text().splitlines()[1:] if line.strip()]}
     def check(name, action):
         try:
             detail = action(); checks.append({'name': name, 'passed': True, 'detail': detail})

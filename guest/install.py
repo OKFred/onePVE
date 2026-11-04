@@ -9,6 +9,7 @@ import pwd
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import tarfile
 import tempfile
@@ -164,6 +165,25 @@ def require_disk_capacity(total):
         raise RuntimeError('Expand the root filesystem on a >=32 GiB disk before installation')
 
 
+def guest_swap():
+    path = Path('/var/lib/onepve-agent/swapfile')
+    if path.is_symlink() or path.parent.resolve() != path.parent or not path.is_file():
+        raise RuntimeError('Cloud-init swapfile is missing or redirected; inspect cloud-init logs')
+    info = path.stat()
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size != 4 * 1024**3:
+        raise RuntimeError('Cloud-init swapfile must be a regular 4 GiB file')
+    if os.name == 'posix' and (info.st_uid != 0 or stat.S_IMODE(info.st_mode) != 0o600):
+        raise RuntimeError('Cloud-init swapfile must be root-owned with mode 0600')
+    active = [line.split() for line in Path('/proc/swaps').read_text().splitlines()[1:]]
+    if not any(len(fields) >= 5 and fields[0] == str(path) and int(fields[2]) >= 4 * 1024**2 - 4096 for fields in active):
+        raise RuntimeError('Cloud-init swapfile is not active; inspect cloud-init logs before installation')
+    entries = [line.split('#', 1)[0].split() for line in Path('/etc/fstab').read_text().splitlines()]
+    if not any(len(fields) >= 4 and fields[0] == str(path) and fields[2] == 'swap'
+               and 'noauto' not in fields[3].split(',') for fields in entries):
+        raise RuntimeError('Cloud-init swapfile has no automatic boot entry in /etc/fstab')
+    return dict(status='READY', path=str(path), size_bytes=info.st_size, active=True, persistent=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--manifest', type=Path, required=True)
@@ -182,6 +202,8 @@ def main():
     # desktop user; private state/files get explicit 0700/0600 below.
     os.umask(0o022)
     os.environ['DEBIAN_FRONTEND'] = 'noninteractive'
+    swap = guest_swap()
+    print('[onePVE guest] Swap: ' + json.dumps(swap, ensure_ascii=False), flush=True)
     masked = False
     if subprocess.run(['systemctl', 'is-active', '--quiet', 'lightdm.service']).returncode != 0:
         if not Path('/run/systemd/system/lightdm.service').is_symlink():
@@ -334,10 +356,11 @@ def main():
         if values['start_desktop']:
             run(['systemctl', 'start', 'lightdm.service'])
         write('/var/lib/onepve-agent/install.json', json.dumps({'status': 'INSTALLED', 'user': user, 'uid': account.pw_uid,
+              'swap': swap,
               'versions': {k: values[k] for k in ['node_version', 'mcp_version', 'fnm_version', 'codex_version']},
               'viewer_port': values['viewer_port'], 'credential_policy': 'ssh-public-key-only; dedicated empty-password keyring'}, indent=2) + '\n', 0o600)
         selected_mode = json.loads((CONFIG / 'mode.json').read_text())['mode']
-        print(json.dumps({'status': 'GUEST_INSTALLED', 'user': user, 'node': actual, 'mode': selected_mode}))
+        print(json.dumps({'status': 'GUEST_INSTALLED', 'user': user, 'node': actual, 'mode': selected_mode, 'swap': swap}))
     finally:
         if masked:
             subprocess.run(['systemctl', 'unmask', '--runtime', 'lightdm.service'], check=False)

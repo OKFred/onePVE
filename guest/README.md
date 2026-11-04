@@ -12,6 +12,16 @@ and an expanded root filesystem on a disk of at least 32 GiB (the new-VM default
 Cloud-init supplies the user's SSH
 public key; passwords, private keys and Codex login tokens do not enter the image.
 
+The new-VM Cloud-init config creates a 4 GiB
+`/var/lib/onepve-agent/swapfile` (root-owned, 0600), persists it through
+`/etc/fstab`, and activates it on first boot. Before installing desktop packages,
+the guest installer verifies the file, active capacity and boot entry; a failed
+Cloud-init setup stops installation instead of silently continuing without swap.
+This uses 4 GiB inside the existing 32 GiB virtual disk and does not change
+swappiness. The result is recorded in `install.json`; runtime verification reports
+the actual swap total and active paths. This is a new-VM feature, not an existing
+guest migration or repair tool.
+
 The JSON manifest fields and defaults are:
 
 ```json

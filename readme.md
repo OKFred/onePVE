@@ -32,6 +32,7 @@ bash onePVE/menu.sh
 ## 工作机内容
 
 - Debian 13 官方稳定版 **generic amd64** cloud image，下载时锁定版本及 SHA512，校验后导入；不要替换为 genericcloud。
+- 默认VM名称与客机主机名为`ai-dev`，可在向导中指定其他名称；已有VM和存储配置不自动改名。
 - 最低4 vCPU、固定8 GiB内存，系统盘默认且最低32 GiB；Q35／OVMF、VirtIO SCSI、discard，保留 PVE 图形救援控制台。
 - 普通用户 `agent`、SSH 公钥、QEMU Guest Agent、XFCE、Chromium、中文字体与输入法。
 - fnm 管理 Node.js 26，记录完整版本；MCP和服务使用绝对路径与版本文件，不依赖交互式 `.bashrc`。Codex CLI 账户由用户首次重新授权，镜像不带任何旧登录。

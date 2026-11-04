@@ -134,8 +134,8 @@ PY
     vmid="${vmid:-${settings[0]}}"
   fi
   onepve_agent_number "$vmid" 100 || { printf 'VMID 必须是100到999999999的整数。\n'; return 1; }
-  read -r -p '名称 [agent-browser]：' name || return
-  name="${name:-agent-browser}"
+  read -r -p '名称 [ai-dev]：' name || return
+  name="${name:-ai-dev}"
   [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9.-]{0,62}$ ]] || { printf '名称无效。\n'; return 1; }
   read -r -p "选择一个磁盘存储 ID [${settings[1]}]：" storage || return
   storage="${storage:-${settings[1]}}"

@@ -114,7 +114,7 @@ def public_key(value):
 
 def normalize(values):
     values=dict(values)
-    defaults=dict(name='agent-browser',cores=4,memory=8192,disk=32,gpu='auto',viewer_port=16080,
+    defaults=dict(name='ai-dev',cores=4,memory=8192,disk=32,gpu='auto',viewer_port=16080,
                   mac=None,expected_ip=None,snippets_storage=None,address=None,gateway=None,nameserver=None)
     for key,value in defaults.items(): values.setdefault(key,value)
     for field,minimum,maximum in [('vmid',100,999999999),('cores',4,1024),('memory',8192,10485760),('disk',32,1048576),('viewer_port',1024,65535)]:
@@ -916,7 +916,7 @@ def main(argv=None):
     commands.add_parser('prepare')
     for action in ['plan','create','rebuild']:
         child=commands.add_parser(action)
-        child.add_argument('--vmid',type=int,required=True);child.add_argument('--name',default='agent-browser')
+        child.add_argument('--vmid',type=int,required=True);child.add_argument('--name',default='ai-dev')
         child.add_argument('--storage',required=True);child.add_argument('--snippets-storage');child.add_argument('--bridge',required=True)
         child.add_argument('--cores',type=int,default=4);child.add_argument('--memory',type=int,default=8192);child.add_argument('--disk',type=int,default=32)
         keys=child.add_mutually_exclusive_group(required=True);keys.add_argument('--ssh-key');keys.add_argument('--ssh-key-file',type=Path)

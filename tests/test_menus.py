@@ -309,6 +309,7 @@ class MenuTests(unittest.TestCase):
         self.assertEqual(calls[0][:2], ['agent', 'plan'])
         self.assertEqual(calls[0][calls[0].index('--ssh-key') + 1], 'ssh-ed25519 AAAA demo')
         self.assertEqual(calls[0][calls[0].index('--vmid') + 1], '219')
+        self.assertEqual(calls[0][calls[0].index('--name') + 1], 'ai-dev')
         self.assertEqual(calls[0][calls[0].index('--cores') + 1], '4')
         self.assertEqual(calls[0][calls[0].index('--memory') + 1], '8192')
         self.assertEqual(calls[0][calls[0].index('--disk') + 1], '32')
@@ -459,16 +460,16 @@ class MenuTests(unittest.TestCase):
                  {'path': '/dev/nvme1n1', 'type': 'disk', 'model': 'Disk Two', 'size': 1000 * 1024**3}]
         parts = [{'path': disk['path'] + 'p3', 'type': 'part', 'children': [disk]} for disk in disks]
         datasets = {
-            '/storage': [{'storage': 'agent-browser', 'path': '/var/lib/agent-browser-storage',
+            '/storage': [{'storage': 'ai-dev', 'path': '/var/lib/ai-dev-storage',
                           'password': 'TEST_SECRET_PASSWORD', 'encryption-key': 'TEST_SECRET_KEY'},
                          {'storage': 'thin-images', 'vgname': 'pve', 'thinpool': 'data'}],
             '*/storage': [{'storage': 'thin-images', 'type': 'lvmthin', 'content': 'images', 'active': 1, 'avail': 500},
-                          {'storage': 'agent-browser', 'type': 'dir', 'content': 'images,snippets', 'active': 1, 'avail': 600}],
+                          {'storage': 'ai-dev', 'type': 'dir', 'content': 'images,snippets', 'active': 1, 'avail': 600}],
             '*/network': [{'iface': 'br-test', 'type': 'bridge', 'active': 1}],
             '/cluster/nextid': 219,
         }
         probes = {
-            'findmnt:/var/lib/agent-browser-storage': {'filesystems': [
+            'findmnt:/var/lib/ai-dev-storage': {'filesystems': [
                 {'target': '/', 'source': '/dev/mapper/pve-root', 'fstype': 'ext4'}]},
             'lsblk:/dev/mapper/pve-root': {'blockdevices': [
                 {'path': '/dev/mapper/pve-root', 'type': 'lvm', 'children': parts}]},
@@ -481,9 +482,9 @@ class MenuTests(unittest.TestCase):
     def test_storage_discovery_tracks_all_directory_and_lvm_disks_without_secrets(self):
         datasets, probes = self.storage_fixture()
         data, calls = self.discovery(datasets, probes)
-        self.assertEqual([s['storage'] for s in data['storages']], ['agent-browser', 'thin-images'])
+        self.assertEqual([s['storage'] for s in data['storages']], ['ai-dev', 'thin-images'])
         directory, thin = [s['location'] for s in data['storages']]
-        self.assertEqual(directory['path'], '/var/lib/agent-browser-storage')
+        self.assertEqual(directory['path'], '/var/lib/ai-dev-storage')
         self.assertEqual(directory['mount'], {'target': '/', 'source': '/dev/mapper/pve-root', 'fstype': 'ext4'})
         self.assertEqual((thin['vgname'], thin['thinpool']), ('pve', 'data'))
         for location in (directory, thin):
@@ -497,7 +498,7 @@ class MenuTests(unittest.TestCase):
                 + 'onepve_agent_resources() { printf "%s\\n" ' + shlex.quote(json.dumps(data)) + '; }\n'
                 + self.mock_cli() + 'onepve_agent_wizard create')
         result = self.shell(code, self.form())
-        for text in ['/var/lib/agent-browser-storage', '/dev/mapper/pve-root', 'ext4',
+        for text in ['/var/lib/ai-dev-storage', '/dev/mapper/pve-root', 'ext4',
                      '/dev/nvme0n1', '/dev/nvme1n1', 'Disk One', 'Disk Two', '根文件系统', 'pve', 'data']:
             self.assertIn(text, result.stdout)
         self.assertLess(result.stdout.index('根文件系统'), result.stdout.index('CLI\t'))
@@ -522,15 +523,15 @@ class MenuTests(unittest.TestCase):
         self.assertFalse(any(args[0] in ('lsblk', 'pvs') for args in calls))
 
     def test_optional_storage_probes_fail_without_blocking_selection(self):
-        failures = [('/storage', 'missing'), ('findmnt:/var/lib/agent-browser-storage', 'missing'),
-                    ('findmnt:/var/lib/agent-browser-storage', 'timeout'),
-                    ('findmnt:/var/lib/agent-browser-storage', 'invalid'),
+        failures = [('/storage', 'missing'), ('findmnt:/var/lib/ai-dev-storage', 'missing'),
+                    ('findmnt:/var/lib/ai-dev-storage', 'timeout'),
+                    ('findmnt:/var/lib/ai-dev-storage', 'invalid'),
                     ('lsblk:/dev/mapper/pve-root', 'invalid'), ('pvs', 'invalid')]
         for key, failure in failures:
             with self.subTest(key=key, failure=failure):
                 datasets, probes = self.storage_fixture()
                 data, _ = self.discovery(datasets, probes, {key: failure})
-                self.assertEqual([s['storage'] for s in data['storages']], ['agent-browser', 'thin-images'])
+                self.assertEqual([s['storage'] for s in data['storages']], ['ai-dev', 'thin-images'])
                 self.assertEqual(data['nextid'], 219)
         for key, value in [('pvs', {'report': [None]}),
                            ('lsblk:/dev/mapper/pve-root', {'blockdevices': [{'children': 7}]})]:
@@ -538,7 +539,7 @@ class MenuTests(unittest.TestCase):
                 datasets, probes = self.storage_fixture()
                 probes[key] = value
                 data, _ = self.discovery(datasets, probes)
-                self.assertEqual([s['storage'] for s in data['storages']], ['agent-browser', 'thin-images'])
+                self.assertEqual([s['storage'] for s in data['storages']], ['ai-dev', 'thin-images'])
 
 
 if __name__ == '__main__':

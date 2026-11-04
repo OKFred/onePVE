@@ -52,6 +52,25 @@ class MenuTests(unittest.TestCase):
     def source(self, file):
         return 'source ' + shlex.quote((REPO / file).as_posix()) + '\n'
 
+    def version_repo(self):
+        if not shutil.which('git'):
+            self.skipTest('Git is required for version checks')
+        directory = self.root / 'version-repo'
+        directory.mkdir()
+        for arguments in [
+            ['init', '--quiet'], ['config', 'user.name', 'onePVE test'],
+            ['config', 'user.email', 'onepve-test@example.invalid'],
+            ['config', 'commit.gpgsign', 'false'], ['config', 'core.autocrlf', 'false'],
+            ['config', 'core.hooksPath', (directory / 'no-hooks').as_posix()],
+        ]:
+            subprocess.run(['git', '-C', str(directory), *arguments], check=True, capture_output=True)
+        (directory / 'tracked.txt').write_text('original\n', encoding='utf-8')
+        subprocess.run(['git', '-C', str(directory), 'add', 'tracked.txt'], check=True, capture_output=True)
+        subprocess.run(['git', '-C', str(directory), 'commit', '--quiet', '-m', 'initial'],
+                       check=True, capture_output=True)
+        commit = subprocess.check_output(['git', '-C', str(directory), 'rev-parse', 'HEAD'], text=True).strip()
+        return directory, commit
+
     def mock_cli(self):
         return 'onepve_cli() { printf "CLI"; printf "\\t%s" "$@"; printf "\\n"; }\n'
 
@@ -126,14 +145,64 @@ class MenuTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_import_has_no_actions_and_loads_from_other_cwd(self):
-        result = self.shell(self.source('menu.sh')
+        result = self.shell('git() { printf "UNEXPECTED_GIT\\n"; return 1; }; '
+                            'python3() { printf "UNEXPECTED_PYTHON\\n"; return 1; };\n'
+                            + self.source('menu.sh')
                             + 'before="$PWD"; onepve_load_components || exit; '
                               '[[ "$PWD" == "$before" ]] || exit 2; '
                               'declare -F the_pass_through the_agent_workstation; printf "DONE\\n"')
         self.assertIn('the_pass_through', result.stdout)
         self.assertIn('the_agent_workstation', result.stdout)
         self.assertIn('DONE', result.stdout)
+        self.assertNotIn('UNEXPECTED_', result.stdout)
         self.assertEqual(result.stderr, '')
+
+    def test_menu_version_keeps_startup_commit_after_head_changes(self):
+        directory, commit = self.version_repo()
+        quoted = shlex.quote(directory.as_posix())
+        result = self.shell(self.source('menu.sh') + 'ONEPVE_ROOT=' + quoted + '\n'
+                            'onepve_capture_version; menu_title; '
+                            'git -C "$ONEPVE_ROOT" commit --quiet --allow-empty -m newer || exit; menu_title')
+        current = subprocess.check_output(['git', '-C', str(directory), 'rev-parse', 'HEAD'], text=True).strip()
+        self.assertNotEqual(current, commit)
+        self.assertEqual(result.stdout.count('启动版本: ' + commit[:12]), 2)
+        self.assertNotIn(current[:12], result.stdout)
+        self.assertNotIn('本地修改', result.stdout)
+        self.assertIn('更新后需退出并重新启动菜单', result.stdout)
+
+    def test_menu_version_marks_tracked_changes_without_refreshing_index(self):
+        directory, commit = self.version_repo()
+        (directory / 'tracked.txt').write_text('modified\n', encoding='utf-8')
+        index = directory / '.git' / 'index'
+        before = index.stat().st_mtime_ns
+        result = self.shell(self.source('menu.sh') + 'ONEPVE_ROOT=' + shlex.quote(directory.as_posix())
+                            + '\nonepve_capture_version; menu_title')
+        self.assertIn('启动版本: ' + commit[:12] + '（本地修改）', result.stdout)
+        self.assertEqual(index.stat().st_mtime_ns, before)
+
+    def test_menu_version_uses_distribution_record_instead_of_parent_repository(self):
+        parent, parent_commit = self.version_repo()
+        directory = parent / 'distributed-copy'
+        directory.mkdir()
+        commit = 'b' * 40
+        (directory / 'onepve-source.json').write_text(json.dumps({'commit': commit}), encoding='utf-8')
+        result = self.shell(self.source('menu.sh') + 'ONEPVE_ROOT=' + shlex.quote(directory.as_posix())
+                            + '\nonepve_capture_version; menu_title')
+        self.assertIn('启动版本: ' + commit[:12] + '（分发记录）', result.stdout)
+        self.assertNotIn(parent_commit[:12], result.stdout)
+
+    def test_menu_version_unknown_without_valid_repository_or_record(self):
+        path = self.root / 'onepve-source.json'
+        for content in [None, '{', '{"commit":"invalid"}', '[]']:
+            with self.subTest(content=content):
+                if content is None:
+                    path.unlink(missing_ok=True)
+                else:
+                    path.write_text(content, encoding='utf-8')
+                result = self.shell(self.source('menu.sh') + 'ONEPVE_ROOT=' + shlex.quote(self.root.as_posix())
+                                    + '\nonepve_capture_version; menu_title')
+                self.assertIn('启动版本: 未知', result.stdout)
+                self.assertEqual(result.stderr, '')
 
     def test_legacy_index_only_routes_to_menu(self):
         result = self.shell(self.source('index.sh')

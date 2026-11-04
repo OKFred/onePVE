@@ -1,14 +1,89 @@
 """Small shared PVE and QEMU Guest Agent primitives; import has no side effects."""
 import base64
+import contextlib
 import json
 import os
 from pathlib import Path
 import socket
 import subprocess
+import sys
 import tempfile
+import threading
 import time
 
 STATE_ROOT = Path('/var/lib/onepve')
+_progress = None
+
+
+class _Progress:
+    def __init__(self, stream):
+        self.stream = stream
+        self.started = self.stage_started = time.monotonic()
+        self.stage = self.detail = ''
+        self.lock = threading.Lock()
+        self.stopped = threading.Event()
+        self.thread = threading.Thread(target=self._heartbeat, daemon=True)
+        self.thread.start()
+
+    def _write(self, waiting=False):
+        if not self.stage or self.stopped.is_set():
+            return
+        now = time.monotonic()
+        elapsed = max(0, int(now - self.started))
+        stage_elapsed = max(0, int(now - self.stage_started))
+        message = '【进度】%s | 本次已用时 %02d:%02d | 本阶段 %02d:%02d' % (
+            self.stage, elapsed // 60, elapsed % 60, stage_elapsed // 60, stage_elapsed % 60)
+        if waiting:
+            message += ' | 等待中'
+        if self.detail:
+            message += ' | ' + self.detail
+        try:
+            print(message, file=self.stream, flush=True)
+        except (OSError, ValueError):
+            self.stopped.set()
+
+    def update(self, stage, detail=''):
+        with self.lock:
+            if (stage, detail) == (self.stage, self.detail):
+                return
+            if stage != self.stage:
+                self.stage_started = time.monotonic()
+            self.stage, self.detail = stage, detail
+            self._write()
+
+    def _heartbeat(self):
+        while not self.stopped.wait(30):
+            with self.lock:
+                self._write(waiting=True)
+
+    def close(self):
+        self.stopped.set()
+        self.thread.join(timeout=1)
+
+
+@contextlib.contextmanager
+def progress_session():
+    """Keep JSON on stdout and enable human progress only on a terminal."""
+    global _progress
+    try:
+        terminal = sys.stderr is not None and sys.stderr.isatty()
+    except (OSError, ValueError):
+        terminal = False
+    if _progress is not None or not terminal:
+        yield
+        return
+    reporter = _Progress(sys.stderr)
+    _progress = reporter
+    try:
+        yield
+    finally:
+        reporter.close()
+        _progress = None
+
+
+def progress(stage, detail=''):
+    if _progress is not None:
+        _progress.update(stage, detail)
 
 
 def repo_root():

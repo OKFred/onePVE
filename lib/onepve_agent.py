@@ -25,7 +25,7 @@ except ImportError:
 import onepve_artifacts as artifacts
 import onepve_gpu as gpu
 from onepve_common import (STATE_ROOT, Qga, atomic_json, node_name, pve_get,
-                          repo_root, require_root, run, vm_config)
+                          progress, progress_session, repo_root, require_root, run, vm_config)
 
 AGENT_STATE = STATE_ROOT / 'agent'
 VM_CONFIGS = Path('/etc/pve/qemu-server')
@@ -35,6 +35,18 @@ IN_PROGRESS = {'VM_CREATING', 'DISK_IMPORTING', 'DISK_CONFIGURING', 'CLOUD_CONFI
                'CLOUD_WAIT', 'PAYLOAD_UPLOADING', 'INSTALL_RUNNING', 'BASE_VERIFYING',
                'BASE_READY', 'GUEST_DRIVER_RUNNING', 'GUEST_DRIVER_READY', 'GPU_ATTACHING',
                'GPU_BOOTING', 'GPU_MODE_SWITCHING', 'GPU_VERIFYING', 'GPU_FALLBACK'}
+PHASE_LABELS = {
+    'PLANNED': '准备部署工作机', 'VM_CREATING': '创建工作机 VM', 'VM_CREATED': 'VM 已创建',
+    'DISK_IMPORTING': '导入 Debian 系统镜像', 'DISK_CONFIGURING': '配置系统磁盘', 'DISK_READY': '系统磁盘已准备',
+    'CLOUD_CONFIGURING': '配置 Cloud-init 和网络', 'CLOUD_WAIT': '等待 VM 启动和 Cloud-init 完成',
+    'CLOUD_READY': 'Debian 基础系统已就绪', 'PAYLOAD_UPLOADING': '上传工作环境安装文件', 'PAYLOAD_READY': '安装文件已上传',
+    'INSTALL_RUNNING': '安装桌面、浏览器和 Node.js', 'BASE_VERIFYING': '验证基础工作环境', 'BASE_READY': '基础工作环境已就绪',
+    'GUEST_DRIVER_RUNNING': '编译并安装客机核显驱动', 'GUEST_DRIVER_READY': '客机核显驱动已准备',
+    'GPU_ATTACHING': '接入已准备的显卡设备', 'GPU_BOOTING': '等待 GPU 模式重启', 'GPU_MODE_SWITCHING': '切换 Wayland 桌面',
+    'GPU_VERIFYING': '验证原生 EGL 和浏览器硬件加速', 'READY_GPU': 'GPU 工作机验收完成', 'READY_SOFTWARE': '软件桌面工作机验收完成',
+    'GPU_FALLBACK': 'GPU 验收未完成，正在恢复软件桌面', 'GPU_FAILED_SOFTWARE_READY': 'GPU 失败，软件桌面已恢复可用',
+    'REMOVE_REQUESTED': '准备删除指定工作机', 'DELETING': '删除指定工作机', 'DELETED': '指定 VM 已删除', 'REMOVED': '工作机专属资源已移除',
+}
 
 
 def need(value, message):
@@ -54,6 +66,9 @@ def _save(state, phase=None, **changes):
     if phase is not None: state['phase'] = phase
     state.update(changes, updated_utc=datetime.now(timezone.utc).isoformat())
     atomic_json(_state_path(state['vmid']), state)
+    if phase is not None:
+        progress('VM %s：%s' % (state['vmid'], PHASE_LABELS.get(phase, '更新部署状态')),
+                 '宿主状态：' + str(_state_path(state['vmid'])))
 
 
 @contextlib.contextmanager
@@ -551,6 +566,8 @@ def _job(state,name,command,timeout=7200,retry_failed=False):
         directory='/var/lib/onepve-agent/jobs';result=directory+'/'+unit+'.json';script=state['guest_stage']+'/'+unit+'.py'
         job=dict(name=name,unit=unit,path=result,script=script,command=command)
         jobs[name]=job;state['job_history'].append(dict(job));_save(state)
+    progress('VM %s：%s' % (state['vmid'], PHASE_LABELS.get(state.get('phase'), '运行客机安装任务')),
+             '客机日志：' + str(Path(job['path']).with_suffix('.log')))
     wrapper="""import subprocess,json,os
 from pathlib import Path
 p=Path(RESULT);p.parent.mkdir(parents=True,exist_ok=True,mode=0o700);os.umask(0o077)
@@ -893,6 +910,7 @@ def verify(vmid):
         return dict(status='VERIFIED',vmid=vmid,mode=state.get('mode'),runtime=result,connection=state['connection'])
 
 
+@progress_session()
 def main(argv=None):
     parser=argparse.ArgumentParser(description=__doc__);commands=parser.add_subparsers(dest='action',required=True)
     commands.add_parser('prepare')

@@ -2,6 +2,30 @@
 
 ONEPVE_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
+onepve_capture_version() {
+  local top commit changes
+  ONEPVE_RUNNING_VERSION='未知'
+  if top="$(git --no-optional-locks -C "$ONEPVE_ROOT" rev-parse --show-toplevel 2>/dev/null)" \
+    && [[ "$(cd -- "$top" && pwd -P)" == "$(cd -- "$ONEPVE_ROOT" && pwd -P)" ]] \
+    && commit="$(git --no-optional-locks -C "$ONEPVE_ROOT" rev-parse --verify HEAD 2>/dev/null)" \
+    && [[ "$commit" =~ ^([[:xdigit:]]{40}|[[:xdigit:]]{64})$ ]]; then
+    ONEPVE_RUNNING_VERSION="${commit:0:12}"
+    if changes="$(git --no-optional-locks -C "$ONEPVE_ROOT" status --porcelain --untracked-files=no 2>/dev/null)"; then
+      [[ -z "$changes" ]] || ONEPVE_RUNNING_VERSION+='（本地修改）'
+    else
+      ONEPVE_RUNNING_VERSION+='（修改状态未知）'
+    fi
+    return 0
+  fi
+  if [[ -r "$ONEPVE_ROOT/onepve-source.json" ]]; then
+    commit="$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("commit", ""))' \
+      < "$ONEPVE_ROOT/onepve-source.json" 2>/dev/null)" || return 0
+    if [[ "$commit" =~ ^([[:xdigit:]]{40}|[[:xdigit:]]{64})$ ]]; then
+      ONEPVE_RUNNING_VERSION="${commit:0:12}（分发记录）"
+    fi
+  fi
+}
+
 onepve_load_components() {
   local previous="$PWD" component
   # Legacy components resolve their own dependencies relative to cwd.
@@ -18,6 +42,7 @@ menu_title() {
   date
   printf '%s\n' 'onePVE 工具箱（宿主操作需要 root）' \
     '先用03准备显卡，再用08创建 Agent 工作机。'
+  printf '启动版本: %s（更新后需退出并重新启动菜单）\n' "${ONEPVE_RUNNING_VERSION:-未知}"
 }
 
 menu_back() {
@@ -29,6 +54,7 @@ main() {
     printf '请在 PVE 宿主上以 root 运行本菜单。\n' >&2
     return 1
   fi
+  onepve_capture_version
   onepve_load_components || return
   local choice
   while true; do

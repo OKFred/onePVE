@@ -210,7 +210,7 @@ class AgentTests(unittest.TestCase):
     def test_generated_driver_and_prestart_scripts_compile(self):
         s=state(driver_spec=agent.gpu.driver_spec('6.12.113+deb13-amd64'))
         compile(agent._driver_script(s),'<driver>','exec');compile(agent._gpu_hook(s),'<prestart>','exec')
-        self.assertIn("'-k',kernel,'-j','2'",agent._driver_script(s))
+        self.assertNotIn("'-j'",agent._driver_script(s))
         for prerequisite in ['onepve-agent-firmware.sources','trixie-security','Components: non-free-firmware','debian-archive-keyring.gpg',"release.get('VERSION_ID'"]:
             self.assertIn(prerequisite,agent._driver_script(s))
         self.assertNotIn('pve-guests',agent._gpu_hook(s));self.assertIn("'0000:00:02.1'",agent._gpu_hook(s))

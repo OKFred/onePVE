@@ -669,11 +669,11 @@ names=['i915','xe','kvmgt','intel_sriov_compat']
 installed=all(subprocess.run(['modinfo','-k',kernel,'-F','version',name],capture_output=True,text=True).stdout.strip()==spec['version']+'-sriov' for name in names)
 build=Path('/var/lib/dkms/i915-sriov-dkms')/spec['version']/'build'
 if not installed:
- run('dkms','build','-m','i915-sriov-dkms','-v',spec['version'],'-k',kernel,'-j','2')
+ run('dkms','build','-m','i915-sriov-dkms','-v',spec['version'],'-k',kernel)
  modules=sorted((Path('/var/lib/dkms/i915-sriov-dkms')/spec['version']/kernel/os.uname().machine/'module').glob('*.ko*'))
  evidence=gpu._verify_built_modules(kernel,build,modules)
  Path('/var/lib/onepve-agent/driver-build.json').write_text(json.dumps({'spec':spec,'modules':evidence},indent=2))
- run('dkms','install','-m','i915-sriov-dkms','-v',spec['version'],'-k',kernel,'-j','2')
+ run('dkms','install','-m','i915-sriov-dkms','-v',spec['version'],'-k',kernel)
 else:
  modules=[Path(subprocess.check_output(['modinfo','-k',kernel,'-F','filename',name],text=True).strip()) for name in names]
  gpu._verify_built_modules(kernel,build,modules)

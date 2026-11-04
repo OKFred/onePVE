@@ -1,9 +1,11 @@
 import ast
+import contextlib
 import email.message
 import hashlib
 import importlib.util
 import json
 import os
+import stat
 from pathlib import Path
 import sys
 import tempfile
@@ -109,6 +111,72 @@ class ManifestTests(unittest.TestCase):
             record.write_text(json.dumps(metadata))
             with self.assertRaisesRegex(RuntimeError, 'missing files'):
                 installer.runtime_cache(values)
+
+
+class GuestSwapTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)
+        root = Path(self.temp.name)
+        self.swap = root / 'swapfile'; self.swap.write_bytes(b'fixture'); self.swap.chmod(0o600)
+        self.proc = root / 'swaps'
+        self.proc.write_text('Filename Type Size Used Priority\n%s file 4194300 0 -2\n' % self.swap)
+        self.fstab = root / 'fstab'
+        self.fstab.write_text('# keep this comment\n%s none swap sw 0 0\n' % self.swap)
+        self.size = 4 * 1024**3; self.owner = 0; self.mode = None
+        original_stat = Path.stat
+        def metadata(path, *args, **kwargs):
+            info = original_stat(path, *args, **kwargs)
+            if path != self.swap:
+                return info
+            return types.SimpleNamespace(st_mode=self.mode or info.st_mode, st_uid=self.owner,
+                                         st_nlink=info.st_nlink, st_size=self.size)
+        aliases = {'/var/lib/onepve-agent/swapfile': self.swap, '/proc/swaps': self.proc, '/etc/fstab': self.fstab}
+        self.stack = contextlib.ExitStack(); self.addCleanup(self.stack.close)
+        self.stack.enter_context(patch.object(installer, 'Path', side_effect=lambda value: aliases.get(str(value), Path(value))))
+        self.stack.enter_context(patch.object(Path, 'stat', metadata))
+
+    def test_active_persistent_swap_allows_header_overhead_and_does_not_mutate_files(self):
+        before = self.fstab.read_bytes()
+        with patch.object(installer.subprocess, 'run', side_effect=AssertionError('validation issued a command')):
+            result = installer.guest_swap()
+        self.assertEqual(result['status'], 'READY'); self.assertTrue(result['active']); self.assertTrue(result['persistent'])
+        self.assertEqual(result['size_bytes'], 4 * 1024**3); self.assertEqual(self.fstab.read_bytes(), before)
+
+    def test_inactive_or_undersized_swap_stops_before_installation(self):
+        for content in ['Filename Type Size Used Priority\n', 'Filename Type Size Used Priority\n%s file 1048576 0 -2\n' % self.swap]:
+            with self.subTest(content=content):
+                self.proc.write_text(content)
+                with self.assertRaisesRegex(RuntimeError, 'not active'): installer.guest_swap()
+
+    def test_missing_disabled_or_commented_boot_entry_is_not_persistent(self):
+        for content in ['', '# %s none swap sw 0 0\n' % self.swap,
+                        '%s none swap sw,noauto 0 0\n' % self.swap]:
+            with self.subTest(content=content):
+                self.fstab.write_text(content)
+                with self.assertRaisesRegex(RuntimeError, 'boot entry'): installer.guest_swap()
+
+    def test_missing_or_wrong_size_file_is_rejected(self):
+        self.size = 1024
+        with self.assertRaisesRegex(RuntimeError, '4 GiB'): installer.guest_swap()
+        self.swap.unlink()
+        with self.assertRaisesRegex(RuntimeError, 'missing'): installer.guest_swap()
+
+    def test_swapfile_symlink_or_hardlink_is_rejected(self):
+        other = self.swap.with_name('other'); self.swap.rename(other)
+        try:
+            self.swap.symlink_to(other)
+        except OSError:
+            self.skipTest('Symlinks unavailable')
+        with self.assertRaisesRegex(RuntimeError, 'redirected'): installer.guest_swap()
+        self.swap.unlink(); os.link(other, self.swap)
+        with self.assertRaisesRegex(RuntimeError, 'regular'): installer.guest_swap()
+
+    @unittest.skipUnless(os.name == 'posix', 'POSIX swapfile ownership and modes')
+    def test_swapfile_must_be_private_and_owned_by_root(self):
+        self.mode = stat.S_IFREG | 0o644
+        with self.assertRaisesRegex(RuntimeError, '0600'): installer.guest_swap()
+        self.mode = stat.S_IFREG | 0o600; self.owner = 1000
+        with self.assertRaisesRegex(RuntimeError, 'root-owned'): installer.guest_swap()
 
 
 class FakeOriginError(Exception):

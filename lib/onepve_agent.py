@@ -175,7 +175,7 @@ def _resources(config):
     bridges=pve_get('/nodes/'+node+'/network')
     need(any(x.get('iface')==config['bridge'] and x.get('type')=='bridge' and x.get('active') for x in bridges),'Selected bridge is not active')
     selected=images[0];thin=selected['type'] in {'dir','nfs','cifs','cephfs','glusterfs','lvmthin','zfspool','rbd'}
-    reserve=20*1024**3 if thin else (config['disk']+2)*1024**3
+    reserve=24*1024**3 if thin else (config['disk']+2)*1024**3
     need(int(selected.get('avail',0))>=reserve,'Insufficient target storage reserve')
     return dict(storage=selected['storage'],storage_type=selected['type'],
                 disk_format='qcow2' if selected['type'] in {'dir','nfs','cifs','cephfs','glusterfs'} else 'raw',
@@ -390,6 +390,7 @@ def _snippet(state,label,content,executable=False):
 def _cloud_config(state):
     cfg=state['config']
     data={'hostname':cfg['name'],'manage_etc_hosts':True,'disable_root':True,'ssh_pwauth':False,
+          'swap':{'filename':'/var/lib/onepve-agent/swapfile','size':4*1024**3},
           'users':[{'name':'agent','shell':'/bin/bash','lock_passwd':True,'groups':['video'],
                     'sudo':None,'ssh_authorized_keys':[cfg['ssh_key']]}],
           'apt':{'preserve_sources_list':False,'sources_list':

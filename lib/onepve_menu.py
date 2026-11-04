@@ -145,6 +145,12 @@ def agent_record(data):
     if image.get('size_bytes') is not None:
         show('镜像大小', '%.1f MiB' % (image['size_bytes'] / 1024**2))
     show('镜像查询提示', data.get('image_lookup_error'))
+    verification = data.get('verification') or {}
+    runtime = data.get('runtime') or ((verification.get('gpu') or verification.get('base') or {}).get('runtime')) or {}
+    swap = runtime.get('swap')
+    if swap is not None:
+        show('Swap 总量', '%.1f GiB' % (swap['total_mib'] / 1024))
+        show('Swap 路径', ', '.join(swap.get('active_paths') or []) or '未启用')
     for cached in data.get('cached_images', []):
         show('可复用镜像', cached.get('version'))
     connection = data.get('connection') or {}

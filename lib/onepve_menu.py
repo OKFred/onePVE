@@ -122,6 +122,13 @@ def agent_record(data):
     show('VMID', data.get('vmid', config.get('vmid')))
     show('名称', config.get('name'))
     show('状态', data.get('phase', data.get('status')))
+    previous = data.get('previous_record')
+    if isinstance(previous, dict):
+        banner('【旧记录待确认】VM 已删除，继续创建前将询问是否清理旧记录；镜像和驱动缓存保留。', 33)
+        show('旧记录', previous.get('path'))
+        show('旧记录阶段', previous.get('phase'))
+    if data.get('previous_record_cleared'):
+        show('旧记录清理', '已确认并完成')
     show('显示模式', data.get('mode'))
     show('存储', config.get('storage', resources.get('storage')))
     show('网桥', config.get('bridge', resources.get('bridge')))

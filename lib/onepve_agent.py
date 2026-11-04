@@ -31,6 +31,7 @@ from onepve_common import (STATE_ROOT, Qga, atomic_json, node_name, pve_get,
 AGENT_STATE = STATE_ROOT / 'agent'
 VM_CONFIGS = Path('/etc/pve/qemu-server')
 PVE_NODES = Path('/etc/pve/nodes')
+QEMU_RUN = Path('/run/qemu-server')
 FINISHED = {'READY_GPU', 'READY_SOFTWARE', 'GPU_FAILED_SOFTWARE_READY'}
 IN_PROGRESS = {'VM_CREATING', 'DISK_IMPORTING', 'DISK_CONFIGURING', 'CLOUD_CONFIGURING',
                'CLOUD_WAIT', 'PAYLOAD_UPLOADING', 'INSTALL_RUNNING', 'BASE_VERIFYING',
@@ -84,6 +85,39 @@ def _lock(vmid, dry_run=False):
     descriptor = os.open(directory/'operation.lock', os.O_RDWR|os.O_CREAT|os.O_NOFOLLOW, 0o600)
     with os.fdopen(descriptor, 'a') as stream:
         fcntl.flock(stream.fileno(), fcntl.LOCK_EX|fcntl.LOCK_NB); yield
+
+
+def _previous_record(vmid):
+    path=_state_path(vmid)
+    if not os.path.lexists(path):return None
+    need(path.parent.resolve()==path.parent.absolute() and path.is_file() and not path.is_symlink(),
+         'Previous operation record is not a regular file or is redirected; inspect it before cleanup')
+    info=path.stat()
+    need(info.st_nlink==1 and (os.name!='posix' or info.st_uid==0 and not info.st_mode&0o022),
+         'Previous operation record is not root protected')
+    raw=path.read_bytes();record=json.loads(raw)
+    need(isinstance(record,dict) and type(record.get('vmid')) is int and record['vmid']==vmid
+         and isinstance(record.get('owner'),str) and re.fullmatch(r'[0-9a-f]{32}',record['owner'])
+         and record.get('operation') in {'create','rebuild','remove'},'Previous operation identity differs; inspect it before cleanup')
+    phase=record.get('phase')
+    need(isinstance(phase,str) and re.fullmatch(r'[A-Z][A-Z0-9_]{0,63}',phase),'Previous operation phase is invalid')
+    config=record.get('config') or {}
+    need(isinstance(config,dict),'Previous operation configuration is invalid')
+    return dict(vmid=vmid,path=str(path),owner=record['owner'],phase=phase,name=config.get('name'),
+                sha256=hashlib.sha256(raw).hexdigest())
+
+
+def _require_missing_vmid(vmid):
+    lxc=VM_CONFIGS.parent/'lxc'/(str(vmid)+'.conf')
+    need(not _exists(vmid) and not os.path.lexists(lxc)
+         and not any(PVE_NODES.glob('*/lxc/'+str(vmid)+'.conf')),
+         'VMID is still in use; the previous operation record was retained')
+    need(not os.path.lexists(QEMU_RUN/(str(vmid)+'.pid')),
+         'QEMU PID file remains; inspect the VM before clearing its previous operation record')
+    # PVE validates availability across QEMU and LXC guests in the cluster.
+    available=pve_get('/cluster/nextid','--vmid',str(vmid))
+    need(type(available) in {int,str} and str(available)==str(vmid),
+         'PVE did not confirm this VMID is free; previous record retained')
 
 
 def public_key(value):
@@ -193,9 +227,12 @@ def _select_gpu(config):
 def plan(config, rebuild=False):
     require_root();config=normalize(config)
     need(rebuild or not _exists(config['vmid']),'VMID already exists; use the separate explicit rebuild action')
+    previous=_previous_record(config['vmid']) if not rebuild else None
+    if previous:_require_missing_vmid(config['vmid'])
     resources=_resources(config);selected=_select_gpu(config)
     images=artifacts.image_options();image=images['latest'] or images['cached'][0]
     return dict(status='PLAN_ONLY',config=config,resources=resources,image=image,
+                previous_record=previous,
                 cached_images=images['cached'],image_lookup_error=images['lookup_error'],image_cache_errors=images['cache_errors'],
                 selected_gpu=selected,mode='wayland' if selected else 'x11',
                 host_gpu_driver_changes=False,host_reboot=False,backup_existing_vm=False,
@@ -856,9 +893,23 @@ def create(config,dry_run=False):
     if dry_run:return plan(config)
     with _lock(config['vmid']):
         need(not _exists(config['vmid']),'VMID already exists; create never overwrites it')
-        need(not _state_path(config['vmid']).exists(),'A previous operation exists; use status/resume or explicit rebuild')
+        previous=_previous_record(config['vmid'])
+        if previous:
+            _require_missing_vmid(config['vmid'])
+            print('【旧部署记录】VM %s 已确认不存在；旧阶段：%s；记录：%s' %
+                  (config['vmid'],previous['phase'],previous['path']),file=sys.stderr,flush=True)
+            print('删除旧部署记录并继续创建？镜像和驱动缓存保留。[y/N]：',end='',file=sys.stderr,flush=True)
+            need(sys.stdin.readline().strip() in {'y','Y'},'已取消：旧部署记录已保留，未继续创建')
         resources=_resources(config);selected=_select_gpu(config);prepared=prepare();_validate_artifacts(prepared)
-        state=_new_state(config,prepared,resources,selected);_save(state)
+        if previous:
+            _require_missing_vmid(config['vmid'])
+            need(_previous_record(config['vmid'])==previous,'Previous operation record changed; cleanup and creation stopped')
+        else:
+            need(not os.path.lexists(_state_path(config['vmid'])),'A previous operation appeared; creation stopped')
+        state=_new_state(config,prepared,resources,selected)
+        if previous:state['previous_record_cleared']={key:previous[key] for key in ['owner','phase']}
+        # Replace only the confirmed state atomically, keeping the lock inode and caches.
+        _save(state)
         _bundle(state)
         return _continue(state)
 

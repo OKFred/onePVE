@@ -96,6 +96,7 @@ onepve_agent_wizard() {
 import json, sys
 x = json.loads(sys.argv[1])
 print(x['nextid']); print(x['storages'][0]['storage']); print(x['bridges'][0]['iface'])
+print('可选磁盘存储（单选，填写存储 ID；新目录需先在 PVE 注册）：')
 for s in x['storages']:
     print('存储: %s (%s, 可用 %.1f GiB)' % (s['storage'], s['type'], int(s.get('avail', 0)) / 1024**3))
     location = s.get('location', {})
@@ -116,6 +117,7 @@ for s in x['storages']:
         print('  物理盘: %s (%s, %s)' % (d['path'], (d.get('model') or '型号未知').strip(), capacity))
     if not location.get('disks'):
         print('  物理盘: 未识别或由存储池/远端管理。')
+print('可选网桥（单选；工作机仅创建1张网卡）：')
 for b in x['bridges']:
     print('网桥: ' + b['iface'])
 PY
@@ -123,6 +125,7 @@ PY
   mapfile -t settings <<<"$defaults"
   printf '\n08 Debian 13 Agent 工作机\n'
   printf '%s\n' "${settings[@]:3}"
+  printf '接下来依次填写：VMID → 名称 → 选择一个存储 ID → 选择一个网桥。\n'
   if [[ "$action" == rebuild ]]; then
     printf '重建会删除指定 VM 的原有磁盘和资料。本入口不提供备份。\n'
     read -r -p '要重建的 VMID：' vmid || return
@@ -134,9 +137,9 @@ PY
   read -r -p '名称 [agent-browser]：' name || return
   name="${name:-agent-browser}"
   [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9.-]{0,62}$ ]] || { printf '名称无效。\n'; return 1; }
-  read -r -p "磁盘存储 [${settings[1]}]：" storage || return
+  read -r -p "选择一个磁盘存储 ID [${settings[1]}]：" storage || return
   storage="${storage:-${settings[1]}}"
-  read -r -p "网桥 [${settings[2]}]：" bridge || return
+  read -r -p "选择一个网桥 [${settings[2]}]：" bridge || return
   bridge="${bridge:-${settings[2]}}"
   python3 - "$metadata" "$storage" "$bridge" <<'PY'
 import json, sys

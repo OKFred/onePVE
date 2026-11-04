@@ -66,9 +66,10 @@ class MenuTests(unittest.TestCase):
                 'printf "%s\\n" ' + shlex.quote(payload) + '; '
                 'printf "%s" ' + shlex.quote(stderr) + ' >&2; return ' + str(returncode) + '; }\n')
 
-    def agent_code(self, action):
+    def agent_code(self, action, metadata=None):
+        metadata = RESOURCE if metadata is None else metadata
         return (self.source('components/the_agent_workstation.sh')
-                + 'onepve_agent_resources() { printf "%s\\n" ' + shlex.quote(json.dumps(RESOURCE)) + '; }\n'
+                + 'onepve_agent_resources() { printf "%s\\n" ' + shlex.quote(json.dumps(metadata)) + '; }\n'
                 + self.mock_cli() + 'onepve_agent_wizard ' + action)
 
     def discovery(self, datasets, probes=None, failures=None):
@@ -112,8 +113,8 @@ class MenuTests(unittest.TestCase):
 
     @staticmethod
     def form(vmid='', cores='', key='ssh-ed25519 AAAA demo', confirmation='n',
-             network='', address='', gateway='', nameserver='', expected_ip='', disk=''):
-        fields = [vmid, '', '', '', cores, '', disk, 'paste', key, '', '', network]
+             network='', address='', gateway='', nameserver='', expected_ip='', disk='', storage='', bridge=''):
+        fields = [vmid, '', storage, bridge, cores, '', disk, 'paste', key, '', '', network]
         if network == 'static':
             fields.extend([address, gateway, nameserver])
         fields.extend([expected_ip, '', confirmation])
@@ -252,6 +253,28 @@ class MenuTests(unittest.TestCase):
         calls = self.calls(result.stdout)
         self.assertEqual([x[:2] for x in calls], [['agent', 'plan'], ['agent', 'create']])
         self.assertEqual(calls[0][2:], calls[1][2:])
+
+    def test_agent_selects_one_nondefault_storage_and_bridge_from_multiple_choices(self):
+        metadata = dict(RESOURCE,
+                        storages=RESOURCE['storages'] + [{'storage': 'second-images', 'type': 'dir', 'avail': 50 * 1024**3}],
+                        bridges=RESOURCE['bridges'] + [{'iface': 'vmbr1', 'type': 'bridge', 'active': 1}])
+        result = self.shell(self.agent_code('create', metadata),
+                            self.form(storage='second-images', bridge='vmbr1', confirmation='y'))
+        calls = self.calls(result.stdout)
+        self.assertEqual([call[:2] for call in calls], [['agent', 'plan'], ['agent', 'create']])
+        for call in calls:
+            for option, value in [('--storage', 'second-images'), ('--bridge', 'vmbr1')]:
+                self.assertEqual(call.count(option), 1)
+                self.assertEqual(call[call.index(option) + 1], value)
+        self.assertIn('可选磁盘存储（单选', result.stdout)
+        self.assertIn('可选网桥（单选', result.stdout)
+        self.assertIn('仅创建1张网卡', result.stdout)
+        for bridge in ['br-test vmbr1', 'br-test,vmbr1']:
+            with self.subTest(bridge=bridge):
+                rejected = self.shell(self.agent_code('create', metadata),
+                                      self.form(storage='second-images', bridge=bridge, confirmation='y'), check=False)
+                self.assertNotEqual(rejected.returncode, 0)
+                self.assertEqual(self.calls(rejected.stdout), [])
 
     def test_agent_disk_minimum_accepts_32_and_rejects_31_before_plan(self):
         for disk, accepted in [('31', False), ('32', True)]:

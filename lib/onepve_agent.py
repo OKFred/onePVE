@@ -193,8 +193,9 @@ def plan(config, rebuild=False):
     require_root();config=normalize(config)
     need(rebuild or not _exists(config['vmid']),'VMID already exists; use the separate explicit rebuild action')
     resources=_resources(config);selected=_select_gpu(config)
-    image=artifacts.resolve_image()
+    images=artifacts.image_options();image=images['latest'] or images['cached'][0]
     return dict(status='PLAN_ONLY',config=config,resources=resources,image=image,
+                cached_images=images['cached'],image_lookup_error=images['lookup_error'],image_cache_errors=images['cache_errors'],
                 selected_gpu=selected,mode='wayland' if selected else 'x11',
                 host_gpu_driver_changes=False,host_reboot=False,backup_existing_vm=False,
                 destructive_vmid=config['vmid'] if rebuild else None)

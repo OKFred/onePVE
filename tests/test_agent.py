@@ -103,6 +103,18 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(answer['status'],'PLAN_ONLY');run.assert_not_called();save.assert_not_called();prepare.assert_not_called()
         self.assertFalse((self.root/'state').exists())
 
+    def test_plan_with_online_failure_reports_local_candidate_without_prompt_or_writes(self):
+        cached={'version':'20261026-2643','path':'/cache/image.qcow2','size_bytes':1024}
+        images=dict(latest=None,cached=[cached],lookup_error='offline',cache_errors=[])
+        with mock.patch.object(agent,'_exists',return_value=False),mock.patch.object(agent,'_resources',return_value={}), \
+             mock.patch.object(agent.artifacts,'image_options',return_value=images), \
+             mock.patch.object(agent.artifacts,'_choose_image',side_effect=AssertionError('prompt')), \
+             mock.patch.object(agent,'_save') as save,mock.patch.object(agent,'prepare') as prepare:
+            answer=agent.create(config(),True)
+        self.assertEqual(answer['image'],cached);self.assertEqual(answer['cached_images'],[cached])
+        self.assertEqual(answer['image_lookup_error'],'offline')
+        save.assert_not_called();prepare.assert_not_called();self.assertFalse((self.root/'state').exists())
+
     def test_explicit_confirmation_precedes_deletion(self):
         with mock.patch.object(agent,'_deletion_check') as check:
             for action in [lambda:agent.remove(103,104),lambda:agent.rebuild(config(),104)]:

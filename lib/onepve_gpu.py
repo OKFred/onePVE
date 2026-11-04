@@ -19,7 +19,7 @@ import tarfile
 import tempfile
 import urllib.request
 
-from onepve_common import run, atomic_json, require_root, STATE_ROOT, repo_root
+from onepve_common import run, atomic_json, progress, progress_session, require_root, STATE_ROOT, repo_root
 
 PCI = Path('/sys/bus/pci/devices')
 PROC = Path('/proc')
@@ -406,6 +406,7 @@ def _ensure_driver(state, spec):
         need(available, 'Matching installed-kernel headers are unavailable; no kernel upgrade will be attempted')
         packages.append(available[0])
     state['status'] = 'INSTALLING_DRIVER_PREREQUISITES'; _save(state)
+    progress('安装宿主核显驱动依赖和匹配的内核头文件')
     run(['apt-get', 'update'], timeout=None)
     run(['apt-get', 'install', '-y', '--no-install-recommends', *packages], timeout=None)
     need(headers.exists(), 'Matching kernel headers were not installed')
@@ -415,11 +416,13 @@ def _ensure_driver(state, spec):
     state['driver'] = dict(spec, owned=True, source=str(source), source_tree_sha256=_source_hash(source), stage='SOURCE_EXTRACTED'); _save(state)
     run(['dkms', 'add', '-m', 'i915-sriov-dkms', '-v', version], timeout=None)
     state['driver']['stage'] = 'BUILDING'; _save(state)
+    progress('编译宿主核显驱动', '宿主 DKMS 记录目录：/var/lib/dkms/i915-sriov-dkms/' + version)
     run(['dkms', 'build', '-m', 'i915-sriov-dkms', '-v', version, '-k', kernel], timeout=None)
     build = Path('/var/lib/dkms/i915-sriov-dkms') / version / 'build'
     output = Path('/var/lib/dkms/i915-sriov-dkms') / version / kernel / os.uname().machine / 'module'
     modules = sorted(output.glob('*.ko*'))
     state['driver']['build_checks'] = _verify_built_modules(kernel, build, modules); _save(state)
+    progress('校验并安装宿主核显驱动')
     run(['dkms', 'install', '-m', 'i915-sriov-dkms', '-v', version, '-k', kernel], timeout=None)
     installed = [_module_field(name, 'filename', kernel) for name in ['i915', 'xe', 'kvmgt', 'intel_sriov_compat']]
     need(all(installed), 'DKMS did not install all companion modules')
@@ -709,6 +712,7 @@ def restore(resource_id, dry_run=False):
         return _restore(resource_id, dry_run)
 
 
+@progress_session()
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest='action', required=True)

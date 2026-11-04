@@ -21,7 +21,7 @@ import urllib.parse
 import urllib.request
 import zipfile
 
-from onepve_common import atomic_json, run
+from onepve_common import atomic_json, progress, run
 from onepve_gpu import driver_spec
 
 CACHE_ROOT = Path('/var/cache/onepve')
@@ -122,9 +122,11 @@ def _download(url, path, expected, algorithm, before_commit=None):
     path = Path(path).absolute()
     need(path.parent.resolve() == path.parent, 'Artifact path has a redirected parent')
     if os.path.lexists(path):
+        progress('校验已缓存文件：' + path.name)
         need(expected is not None and _digest(path, algorithm) == expected,
              'Existing artifact differs or has no trusted digest; it was not overwritten: ' + str(path))
         return path
+    progress('下载并校验文件：' + path.name)
     _private_dir(path.parent)
     descriptor, part_name = tempfile.mkstemp(prefix='.' + path.name + '.part-', dir=path.parent)
     part = Path(part_name)
@@ -297,6 +299,7 @@ def _runtime_cache():
     target = CACHE_ROOT / 'runtime-cache'
     manifest = target / 'runtime-manifest.json'
     if os.path.lexists(target):
+        progress('校验 Node.js、MCP 和 Codex 运行时缓存')
         need(target.is_dir() and not target.is_symlink() and manifest.is_file() and not manifest.is_symlink(),
              'Runtime cache is incomplete or redirected')
         data = json.loads(manifest.read_text())
@@ -331,6 +334,7 @@ def _runtime_cache():
                        HOME=str(home), NPM_CONFIG_USERCONFIG=os.devnull, NPM_CONFIG_GLOBALCONFIG=str(global_config),
                        NPM_CONFIG_REGISTRY='https://registry.npmjs.org',
                        npm_config_cache=str(CACHE_ROOT / 'npm-download-cache'))
+    progress('准备固定版本的 Playwright MCP 和 Codex CLI 缓存')
     run([str(node), str(npm), 'install', '--ignore-scripts', '--no-audit', '--no-fund',
          '--prefix', str(staging / 'npm'), '--save-exact', '--registry=https://registry.npmjs.org',
          '@playwright/mcp@' + MCP_VERSION, '@openai/codex@' + CODEX_VERSION],
@@ -352,6 +356,7 @@ def prepare_artifacts():
     """Prepare every non-apt input before the caller deletes/rebuilds a VM."""
     need(platform.system() == 'Linux' and platform.machine() in {'x86_64', 'amd64'},
          'Runtime cache preparation requires the x86-64 Linux PVE host')
+    progress('读取 Debian 镜像版本和官方校验信息')
     image = resolve_image()
     _private_dir(CACHE_ROOT)
     lock_path = CACHE_ROOT / 'prepare.lock'
@@ -365,6 +370,7 @@ def prepare_artifacts():
         source = CACHE_ROOT / 'drivers' / ('i915-sriov-dkms-' + spec['version'] + '.tar.gz')
         download_verified(spec['url'], source, spec['sha256'])
         runtime = _runtime_cache()
+        progress('部署镜像和运行时缓存已准备完成')
         record = dict(image=dict(image, path=str(target)), image_path=str(target),
                       runtime_cache=str(runtime), runtime_manifest=str(runtime / 'runtime-manifest.json'),
                       driver_sources={spec['version']: str(source)})

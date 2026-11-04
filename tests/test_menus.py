@@ -55,6 +55,17 @@ class MenuTests(unittest.TestCase):
     def mock_cli(self):
         return 'onepve_cli() { printf "CLI"; printf "\\t%s" "$@"; printf "\\n"; }\n'
 
+    def mock_gpu_cli(self, payload=None, returncode=0, stderr=''):
+        if payload is None:
+            payload = {'status': 'READY'}
+        if not isinstance(payload, str):
+            payload = json.dumps(payload, ensure_ascii=False, indent=2)
+        return ('onepve_cli() { { printf "CLI"; printf "\\t%s" "$@"; printf "\\n"; } >&2; '
+                'if [[ " $* " == *" --dry-run "* ]]; then '
+                'printf "%s\\n" \'{"status":"DRY_RUN"}\'; return 0; fi; '
+                'printf "%s\\n" ' + shlex.quote(payload) + '; '
+                'printf "%s" ' + shlex.quote(stderr) + ' >&2; return ' + str(returncode) + '; }\n')
+
     def agent_code(self, action):
         return (self.source('components/the_agent_workstation.sh')
                 + 'onepve_agent_resources() { printf "%s\\n" ' + shlex.quote(json.dumps(RESOURCE)) + '; }\n'
@@ -100,20 +111,81 @@ class MenuTests(unittest.TestCase):
         calls = self.calls(result.stdout)
         self.assertEqual(calls, [['gpu', 'inventory'], ['gpu', 'prepare-sriov', '--pf',
                           '0000:00:02.0', '--num-vfs', '1', '--dry-run']])
+        self.assertIn('【已取消】', result.stdout)
+        self.assertNotIn('【已就绪】', result.stdout)
 
     def test_gpu_apply_follows_successful_preview(self):
-        result = self.shell(self.source('components/the_pass_through.sh') + self.mock_cli()
+        result = self.shell(self.source('components/the_pass_through.sh') + self.mock_gpu_cli()
                             + 'onepve_gpu_apply prepare-passthrough --bdf 0000:02:00.0', 'y\n')
-        self.assertEqual(self.calls(result.stdout), [
+        self.assertEqual(self.calls(result.stderr), [
             ['gpu', 'prepare-passthrough', '--bdf', '0000:02:00.0', '--dry-run'],
             ['gpu', 'prepare-passthrough', '--bdf', '0000:02:00.0']])
+        self.assertIn(json.dumps({'status': 'READY'}, indent=2), result.stdout)
+        self.assertIn('【已就绪】', result.stdout)
+
+    def test_gpu_apply_prints_a_separate_summary_after_unchanged_json(self):
+        for status, label in [('EXTERNAL_READY', '【已就绪】'),
+                              ('NEEDS_REBOOT', '【待重启】'),
+                              ('RESTORED', '【已撤销】'),
+                              ('RESTORED_NEEDS_REBOOT', '【待重启】'),
+                              ('EXTERNAL_PRESERVED', '【已保留】')]:
+            with self.subTest(status=status):
+                payload = {'status': status, 'bdf': '0000:00:02.0', 'detail': '保留原始详情'}
+                raw_json = json.dumps(payload, ensure_ascii=False, indent=2)
+                result = self.shell(self.source('components/the_pass_through.sh')
+                                    + self.mock_gpu_cli(payload)
+                                    + 'onepve_gpu_apply prepare-sriov --pf 0000:00:02.0', 'y\n')
+                self.assertIn(raw_json, result.stdout)
+                lines = [line for line in result.stdout.splitlines() if label in line]
+                self.assertEqual(len(lines), 1, result.stdout)
+                self.assertTrue(lines[0].startswith(label), lines[0])
+                self.assertLess(result.stdout.index(raw_json), result.stdout.index(label))
+                self.assertNotIn('\x1b[', result.stdout)
+
+    def test_gpu_apply_failure_preserves_details_and_exit_code(self):
+        payload = {'status': 'ERROR', 'error': 'driver operation failed'}
+        result = self.shell(self.source('components/the_pass_through.sh')
+                            + self.mock_gpu_cli(payload, returncode=7, stderr='原始错误详情\n')
+                            + 'onepve_gpu_apply prepare-sriov --pf 0000:00:02.0', 'y\n', check=False)
+        self.assertEqual(result.returncode, 7)
+        self.assertIn(json.dumps(payload, ensure_ascii=False, indent=2), result.stdout)
+        self.assertIn('原始错误详情', result.stderr)
+        self.assertIn('【执行失败】', result.stdout)
+        self.assertNotIn('【已就绪】', result.stdout)
+
+    def test_gpu_apply_rejects_nonfinal_or_error_status_even_when_cli_returns_zero(self):
+        for status, label in [('DRY_RUN', '【仅预览】'), ('ERROR', '【执行失败】'),
+                              ('FAILED', '【执行失败】')]:
+            with self.subTest(status=status):
+                result = self.shell(self.source('components/the_pass_through.sh')
+                                    + self.mock_gpu_cli({'status': status})
+                                    + 'onepve_gpu_apply prepare-sriov --pf 0000:00:02.0',
+                                    'y\n', check=False)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(label, result.stdout)
+                self.assertNotIn('【已就绪】', result.stdout)
+
+    def test_gpu_apply_does_not_report_unknown_or_invalid_output_as_success(self):
+        for payload in ['not JSON', '[]', 'null', '{}', '{"status":null}',
+                        '{"status":"NEW_STATUS"}']:
+            with self.subTest(payload=payload):
+                result = self.shell(self.source('components/the_pass_through.sh')
+                                    + self.mock_gpu_cli(payload)
+                                    + 'onepve_gpu_apply prepare-sriov --pf 0000:00:02.0',
+                                    'y\n', check=False)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(payload, result.stdout)
+                self.assertIn('【未确认】', result.stdout)
+                self.assertNotIn('【已就绪】', result.stdout)
 
     def test_gpu_failed_preview_does_not_apply(self):
         result = self.shell(self.source('components/the_pass_through.sh')
-                            + 'onepve_cli() { printf "CLI\\t%s\\n" "$1"; return 1; }; '
+                            + 'onepve_cli() { printf "CLI\\t%s\\n" "$1"; return 7; }; '
                               'onepve_gpu_apply prepare-sriov --pf 0000:00:02.0', 'y\n', check=False)
-        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.returncode, 7)
         self.assertEqual(len(self.calls(result.stdout)), 1)
+        self.assertIn('【预检失败】', result.stdout)
+        self.assertNotIn('【已就绪】', result.stdout)
 
     def test_gpu_invalid_address_never_reaches_prepare(self):
         result = self.shell(self.source('components/the_pass_through.sh') + self.mock_cli()

@@ -25,13 +25,13 @@ PUBLIC='ssh-ed25519 '+wire(b'ssh-ed25519',bytes(range(32)))+' acceptance'
 
 
 def config(**changes):
-    value=dict(vmid=103,storage='agent-browser',bridge='vmbr0',ssh_key=PUBLIC,gpu='none')
+    value=dict(vmid=103,storage='ai-dev',bridge='vmbr0',ssh_key=PUBLIC,gpu='none')
     value.update(changes);return agent.normalize(value)
 
 
 def state(**changes):
     value=dict(vmid=103,owner='a'*32,operation='create',phase='BASE_READY',config=config(),
-               resources={'snippets_storage':'agent-browser'},snippets={},
+               resources={'snippets_storage':'ai-dev'},snippets={},
                guest_stage='/opt/onepve-stage/'+'a'*32,guest_payload='/opt/onepve-stage/'+'a'*32+'/payload',
                selected_gpu=dict(bdf='0000:00:02.1',vendor='0x8086',device='0x7d67'))
     value.update(changes);return value
@@ -67,6 +67,8 @@ class AgentTests(unittest.TestCase):
             with self.subTest(key=key[:40]),self.assertRaises(RuntimeError):agent.public_key(key)
 
     def test_minimum_resources_and_no_shell_values(self):
+        self.assertEqual(config()['name'],'ai-dev')
+        self.assertEqual(config(name='custom-vm')['name'],'custom-vm')
         self.assertEqual(config()['memory'],8192)
         self.assertEqual(config()['disk'],32)
         self.assertEqual(config(disk=32)['disk'],32)
@@ -261,6 +263,7 @@ class AgentTests(unittest.TestCase):
 
     def test_cloud_init_uses_https_deb822_and_bounds_guest_apt_stalls(self):
         document=json.loads(agent._cloud_config(state()).split('\n',1)[1]);apt=document['apt']
+        self.assertEqual(document['hostname'],'ai-dev')
         self.assertFalse(apt['preserve_sources_list']);self.assertNotIn('mirror+file:',apt['sources_list']);self.assertNotIn('http://',apt['sources_list'])
         stanzas=[dict(line.split(': ',1) for line in stanza.splitlines()) for stanza in apt['sources_list'].strip().split('\n\n')]
         self.assertEqual([s['Suites'] for s in stanzas],['trixie trixie-updates','trixie-security'])
@@ -275,6 +278,7 @@ class AgentTests(unittest.TestCase):
             agent.main(['plan','--vmid','103','--storage','pool','--bridge','vmbr0','--ssh-key',PUBLIC,
                         '--address','192.168.11.144/24','--gateway','192.168.11.1','--nameserver','192.168.11.1'])
         value=plan.call_args.args[0]
+        self.assertEqual(value['name'],'ai-dev')
         self.assertEqual(value['disk'],32)
         self.assertEqual(value['address'],'192.168.11.144/24');self.assertEqual(value['gateway'],'192.168.11.1');self.assertEqual(value['nameserver'],'192.168.11.1')
 

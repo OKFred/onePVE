@@ -27,6 +27,8 @@ bash onePVE/menu.sh
 
 网络默认DHCP；需要固定SSH／FRPC目标时，在08选择静态IPv4/CIDR、网关和单个IPv4 DNS，或使用已有DHCP保留。保留MAC不保证DHCP分配原地址；填写“期望IPv4”只做结果核验。
 
+08创建／重建可选择客机Debian APT源：清华`tuna`（向导默认）、中科大`ustc`或官方`official`。CLI使用`--apt-mirror`，不传时保持官方源。桌面和驱动依赖沿用所选镜像，软件包与安全更新均保留HTTPS及Debian签名校验；不修改PVE宿主源，不改变cloud image、Node／npm下载策略，也不自动修改已有VM。
+
 普通创建遇到已存在 VMID 会拒绝覆盖。**重建是独立的删除操作，不自动备份，必须再次输入目标 VMID**；需要保留旧数据时，先使用 PVE 的 VM 备份。仓库不内置任何默认删除列表。
 
 ## 工作机内容

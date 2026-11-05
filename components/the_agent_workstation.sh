@@ -88,7 +88,7 @@ onepve_agent_number() {
 
 onepve_agent_wizard() {
   local action="$1" metadata defaults vmid name storage bridge cores memory disk
-  local key_source public_key mac expected_ip gpu viewer answer confirmation
+  local key_source public_key mac expected_ip gpu viewer answer confirmation apt_mirror
   local network address='' gateway='' nameserver=''
   local -a settings argv
   metadata="$(onepve_agent_resources)" || return
@@ -154,6 +154,13 @@ PY
   onepve_agent_number "$cores" 4 && onepve_agent_number "$memory" 8192 && onepve_agent_number "$disk" 32 || {
     printf '资源配置低于最低要求或不是有效整数。\n'; return 1;
   }
+  printf '客机 Debian APT 源：tuna清华、ustc中科大、official官方；不修改PVE宿主源。\n'
+  read -r -p '选择客机 APT 镜像源 [tuna]：' apt_mirror || return
+  apt_mirror="${apt_mirror:-tuna}"
+  case "$apt_mirror" in
+    official|tuna|ustc) ;;
+    *) printf 'APT 镜像源只能为tuna、ustc或official。\n'; return 1 ;;
+  esac
   read -r -p 'SSH 公钥文件路径（或输入 paste 粘贴公钥，切勿提供私钥）：' key_source || return
   if [[ "$key_source" == paste ]]; then
     read -r -p '粘贴单行 SSH 公钥：' public_key || return
@@ -220,7 +227,7 @@ PY
   read -r -p '本机查看端口 [16080]：' viewer || return; viewer="${viewer:-16080}"
   onepve_agent_number "$viewer" 1024 && (( 10#$viewer <= 65535 )) || { printf '查看端口须为1024到65535。\n'; return 1; }
   argv+=(--vmid "$vmid" --name "$name" --storage "$storage" --bridge "$bridge"
-    --cores "$cores" --memory "$memory" --disk "$disk" --gpu "$gpu" --viewer-port "$viewer")
+    --cores "$cores" --memory "$memory" --disk "$disk" --gpu "$gpu" --viewer-port "$viewer" --apt-mirror "$apt_mirror")
   [[ -z "$mac" ]] || argv+=(--mac "$mac")
   [[ -z "$expected_ip" ]] || argv+=(--expected-ip "$expected_ip")
   if [[ "$network" == static ]]; then

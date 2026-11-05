@@ -142,8 +142,8 @@ class MenuTests(unittest.TestCase):
 
     @staticmethod
     def form(vmid='', cores='', key='ssh-ed25519 AAAA demo', confirmation='n',
-             network='', address='', gateway='', nameserver='', expected_ip='', disk='', storage='', bridge=''):
-        fields = [vmid, '', storage, bridge, cores, '', disk, 'paste', key, '', '', network]
+             network='', address='', gateway='', nameserver='', expected_ip='', disk='', storage='', bridge='', apt_mirror=''):
+        fields = [vmid, '', storage, bridge, cores, '', disk, apt_mirror, 'paste', key, '', '', network]
         if network == 'static':
             fields.extend([address, gateway, nameserver])
         fields.extend([expected_ip, '', '', confirmation, ''])
@@ -388,6 +388,22 @@ class MenuTests(unittest.TestCase):
         calls = self.calls(result.stderr)
         self.assertEqual([x[:2] for x in calls], [['agent', 'plan'], ['agent', 'create']])
         self.assertEqual(calls[0][2:], calls[1][2:])
+
+    def test_agent_apt_mirror_default_and_presets_reach_plan_and_apply(self):
+        for action in ['create','rebuild']:
+            for choice,expected in [('', 'tuna'),('tuna','tuna'),('ustc','ustc'),('official','official')]:
+                with self.subTest(action=action,choice=choice):
+                    result=self.shell(self.agent_code(action),self.form(
+                        vmid='219',apt_mirror=choice,confirmation='219' if action=='rebuild' else 'y'))
+                    calls=self.calls(result.stderr)
+                    self.assertEqual(len(calls),2)
+                    for call in calls:
+                        self.assertEqual(call.count('--apt-mirror'),1)
+                        self.assertEqual(call[call.index('--apt-mirror')+1],expected)
+                    self.assertIn('不修改PVE宿主源',result.stdout)
+        result=self.shell(self.agent_code('create'),self.form(apt_mirror='tuna;touch MIRROR_EXECUTED'),check=False)
+        self.assertNotEqual(result.returncode,0);self.assertEqual(self.calls(result.stderr),[])
+        self.assertFalse((self.root/'MIRROR_EXECUTED').exists())
 
     def test_agent_selects_one_nondefault_storage_and_bridge_from_multiple_choices(self):
         metadata = dict(RESOURCE,

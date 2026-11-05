@@ -12,6 +12,11 @@ import threading
 import time
 
 STATE_ROOT = Path('/var/lib/onepve')
+APT_MIRRORS = {
+    'official': ('Debian 官方', 'https://deb.debian.org/debian', 'https://security.debian.org/debian-security'),
+    'tuna': ('清华 TUNA', 'https://mirrors.tuna.tsinghua.edu.cn/debian', 'https://mirrors.tuna.tsinghua.edu.cn/debian-security'),
+    'ustc': ('中科大 USTC', 'https://mirrors.ustc.edu.cn/debian', 'https://mirrors.ustc.edu.cn/debian-security'),
+}
 _progress = None
 
 

@@ -25,7 +25,7 @@ except ImportError:
 import onepve_artifacts as artifacts
 import onepve_gpu as gpu
 import onepve_driver_cache as driver_cache
-from onepve_common import (STATE_ROOT, Qga, atomic_json, node_name, pve_get,
+from onepve_common import (APT_MIRRORS, STATE_ROOT, Qga, atomic_json, node_name, pve_get,
                           progress, progress_session, repo_root, require_root, run, vm_config)
 
 AGENT_STATE = STATE_ROOT / 'agent'
@@ -150,11 +150,13 @@ def public_key(value):
 def normalize(values):
     values=dict(values)
     defaults=dict(name='ai-dev',cores=4,memory=8192,disk=32,gpu='auto',viewer_port=16080,
-                  mac=None,expected_ip=None,snippets_storage=None,address=None,gateway=None,nameserver=None)
+                  mac=None,expected_ip=None,snippets_storage=None,address=None,gateway=None,nameserver=None,
+                  apt_mirror='official')
     for key,value in defaults.items(): values.setdefault(key,value)
     for field,minimum,maximum in [('vmid',100,999999999),('cores',4,1024),('memory',8192,10485760),('disk',32,1048576),('viewer_port',1024,65535)]:
         need(type(values.get(field)) is int and minimum<=values[field]<=maximum, 'Invalid/minimum resource: '+field)
     need(re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9.-]{0,62}',values['name']), 'Invalid VM name')
+    need(isinstance(values['apt_mirror'],str) and values['apt_mirror'] in APT_MIRRORS, 'Invalid APT mirror')
     for field in ['storage','bridge']:
         need(isinstance(values.get(field),str) and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,63}',values[field]), 'Invalid '+field)
     if values['snippets_storage']:
@@ -426,15 +428,20 @@ def _snippet(state,label,content,executable=False):
 
 def _cloud_config(state):
     cfg=state['config']
+    # Write the Debian 13 deb822 file before apt runs; sources_list can leave the image's mirror+file source active.
+    _,primary,security=APT_MIRRORS[cfg.get('apt_mirror','official')]
+    sources=(f'Types: deb\nURIs: {primary}\nSuites: trixie trixie-updates\nComponents: main\nSigned-By: /usr/share/keyrings/debian-archive-keyring.gpg\n\n'
+             f'Types: deb\nURIs: {security}\nSuites: trixie-security\nComponents: main\nSigned-By: /usr/share/keyrings/debian-archive-keyring.gpg\n')
     data={'hostname':cfg['name'],'manage_etc_hosts':True,'disable_root':True,'ssh_pwauth':False,
           'swap':{'filename':'/var/lib/onepve-agent/swapfile','size':4*1024**3},
           'users':[{'name':'agent','shell':'/bin/bash','lock_passwd':True,'groups':['video'],
                     'sudo':None,'ssh_authorized_keys':[cfg['ssh_key']]}],
-          'apt':{'preserve_sources_list':False,'sources_list':
-                 'Types: deb\nURIs: https://deb.debian.org/debian\nSuites: trixie trixie-updates\nComponents: main\nSigned-By: /usr/share/keyrings/debian-archive-keyring.gpg\n\n'
-                 'Types: deb\nURIs: https://security.debian.org/debian-security\nSuites: trixie-security\nComponents: main\nSigned-By: /usr/share/keyrings/debian-archive-keyring.gpg\n'},
+          'apt':{'preserve_sources_list':True},
           'write_files':[{'path':'/etc/apt/apt.conf.d/80onepve-agent-network','owner':'root:root','permissions':'0644',
-                          'content':'Acquire::http::Timeout "15";\nAcquire::https::Timeout "15";\nAcquire::Retries "2";\n'}],
+                          'content':'Acquire::http::Timeout "15";\nAcquire::https::Timeout "15";\nAcquire::Retries "2";\n'},
+                         {'path':'/etc/apt/sources.list.d/debian.sources','owner':'root:root','permissions':'0644','content':sources},
+                         {'path':'/etc/apt/sources.list','owner':'root:root','permissions':'0644',
+                          'content':'# Managed by onePVE; see /etc/apt/sources.list.d/debian.sources\n'}],
           'package_update':True,'packages':['qemu-guest-agent','openssh-server','python3'],
           'runcmd':[['systemctl','enable','--now','ssh.service'],['systemctl','start','qemu-guest-agent.service'],
                     ['touch','/root/onepve-cloud-ready']]}
@@ -677,6 +684,9 @@ print(json.dumps({'ipv4':addresses,'host_public_key':key,'host_key_fingerprint':
 
 def _driver_script(state):
     spec=state['driver_spec'];stage=state['guest_payload']
+    _,primary,security=APT_MIRRORS[state['config'].get('apt_mirror','official')]
+    apt_sources=(f'Types: deb\nURIs: {primary}\nSuites: trixie\nComponents: non-free-firmware\nSigned-By: /usr/share/keyrings/debian-archive-keyring.gpg\n\n'
+                 f'Types: deb\nURIs: {security}\nSuites: trixie-security\nComponents: non-free-firmware\nSigned-By: /usr/share/keyrings/debian-archive-keyring.gpg\n')
     return """import sys,subprocess,json,hashlib,tarfile,os
 from pathlib import Path
 sys.path.insert(0,LIB)
@@ -698,7 +708,7 @@ def run(*a):subprocess.run(a,check=True,env=environment)
 policy=subprocess.run(['apt-cache','policy','firmware-intel-graphics'],capture_output=True,text=True,check=True).stdout
 if not any(line.strip().startswith('Candidate:') and line.split(':',1)[1].strip() not in {'','(none)'} for line in policy.splitlines()):
  apt_source=Path('/etc/apt/sources.list.d/onepve-agent-firmware.sources')
- apt_body='Types: deb\\nURIs: https://deb.debian.org/debian\\nSuites: trixie\\nComponents: non-free-firmware\\nSigned-By: /usr/share/keyrings/debian-archive-keyring.gpg\\n\\nTypes: deb\\nURIs: https://security.debian.org/debian-security\\nSuites: trixie-security\\nComponents: non-free-firmware\\nSigned-By: /usr/share/keyrings/debian-archive-keyring.gpg\\n'
+ apt_body=APT_SOURCES
  assert Path('/usr/share/keyrings/debian-archive-keyring.gpg').is_file()
  if apt_source.exists() or apt_source.is_symlink():assert not apt_source.is_symlink() and apt_source.stat().st_uid==0 and apt_source.read_text()==apt_body
  else:
@@ -716,7 +726,7 @@ else:path.write_text(body)
 run('update-initramfs','-u','-k',kernel)
 Path(STAGE+'/driver-cache-result.json').write_text(json.dumps(report))
 print(json.dumps({'status':'GUEST_DRIVER_READY','kernel':kernel,'version':spec['version']}))
-""".replace('LIB',repr(stage+'/source/lib')).replace('SPEC',repr(spec)).replace('ARCHIVE',repr(stage+'/drivers/'+spec['version']+'.tar.gz')).replace('DEVICE',repr(state['selected_gpu']['device'])).replace('STAGE',repr(state['guest_stage'])).replace('INCOMING',repr(state.get('driver_cache_input',state['guest_stage']+'/no-driver-cache')))
+""".replace('LIB',repr(stage+'/source/lib')).replace('SPEC',repr(spec)).replace('ARCHIVE',repr(stage+'/drivers/'+spec['version']+'.tar.gz')).replace('DEVICE',repr(state['selected_gpu']['device'])).replace('STAGE',repr(state['guest_stage'])).replace('INCOMING',repr(state.get('driver_cache_input',state['guest_stage']+'/no-driver-cache'))).replace('APT_SOURCES',repr(apt_sources))
 
 
 def _prepare_driver(state,retry=False):
@@ -1006,6 +1016,7 @@ def main(argv=None):
         child=commands.add_parser(action)
         child.add_argument('--vmid',type=int,required=True);child.add_argument('--name',default='ai-dev')
         child.add_argument('--storage',required=True);child.add_argument('--snippets-storage');child.add_argument('--bridge',required=True)
+        child.add_argument('--apt-mirror',choices=APT_MIRRORS,default='official',help='Guest Debian APT mirror (default: official)')
         child.add_argument('--cores',type=int,default=4);child.add_argument('--memory',type=int,default=8192);child.add_argument('--disk',type=int,default=32)
         keys=child.add_mutually_exclusive_group(required=True);keys.add_argument('--ssh-key');keys.add_argument('--ssh-key-file',type=Path)
         child.add_argument('--gpu',default='auto');child.add_argument('--mac');child.add_argument('--expected-ip');child.add_argument('--viewer-port',type=int,default=16080)

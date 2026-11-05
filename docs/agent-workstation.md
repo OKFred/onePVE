@@ -12,6 +12,10 @@
 
 命令行对应参数为 `--address 192.168.50.30/24 --gateway 192.168.50.1 --nameserver 192.168.50.1`，地址应替换为实际网段；只传`--expected-ip`仅做连接结果核验。先查看计划，再创建或显式重建。网络配置写入新VM的Cloud-init，不修改宿主网络。
 
+创建／重建向导会询问**客机 Debian APT 镜像源**，回车默认`tuna`（清华），也可选`ustc`（中科大）或`official`（Debian官方）。命令行使用`--apt-mirror tuna`等固定预设；不传参数以及旧部署记录缺少此字段时沿用官方源。选择写入部署记录，并在计划和状态摘要显示源名称、软件包URL及安全更新URL。只影响新客机的Debian软件包、桌面和驱动依赖，不修改PVE宿主源、官方cloud image版本／SHA512查询、fnm／Node／npm下载或缓存策略；不自动给已有VM换源。
+
+软件包和安全更新均使用所选镜像的HTTPS地址，保留Debian archive keyring签名校验。Cloud-init在早期`write-files`阶段替换`/etc/apt/sources.list.d/debian.sources`并清空传统`sources.list`，`apt.preserve_sources_list=true`防止后续模块再生成默认源。只启用`trixie`、`trixie-updates`和`trixie-security`的`main`；不保留cloud image默认的`mirror+file`、`deb-src`或backports。GPU安装按同一镜像补充`non-free-firmware`，不禁用签名或证书验证。镜像同步或网络故障仍可能导致下载失败；检查日志后再继续安装，不自动改回其他源。
+
 基础系统使用经过校验的Debian13 generic amd64 cloud image。先完成基础系统和软件桌面，再安装匹配客机内核的GPU模块、接入已准备的设备。镜像、fnm、Node、MCP、Codex和驱动的实际版本保存在部署记录；不会把仓库外的实验日期路径、PID、固定BDF或旧账号资料打包进去。
 
 新建VM由Cloud-init在首次启动时创建4 GiB的`/var/lib/onepve-agent/swapfile`，权限0600，并写入`/etc/fstab`供开机自动启用。这会使用VM系统盘4 GiB，虚拟系统盘仍为最低32 GiB；薄置备存储的宿主空闲预留相应提高到24 GiB。客机安装器在安装桌面和编译驱动前检查文件大小、权限、启用和持久化状态，失败就停止并提示查看Cloud-init日志，不假定初始化成功。不修改swappiness，不增加迁移或修复已有VM的功能。安装记录包含处理结果，运行验收和菜单摘要显示实际swap容量与路径；VM内可用`swapon --show`和`free -h`查看。

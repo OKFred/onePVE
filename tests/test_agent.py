@@ -1,4 +1,5 @@
 import base64
+import ast
 import contextlib
 import hashlib
 import io
@@ -88,6 +89,14 @@ class AgentTests(unittest.TestCase):
             with self.subTest(fields=fields),self.assertRaises(RuntimeError):config(**fields)
         self.assertIsNone(config()['address']);self.assertIsNone(config()['gateway'])
         self.assertEqual(config(nameserver='1.1.1.1')['nameserver'],'1.1.1.1')
+
+    def test_apt_mirror_defaults_and_rejects_arbitrary_sources(self):
+        self.assertEqual(config()['apt_mirror'],'official')
+        for mirror in ['official','tuna','ustc']:
+            self.assertEqual(config(apt_mirror=mirror)['apt_mirror'],mirror)
+        for mirror in ['https://example.invalid/debian','tuna\n','other',None,[],{}]:
+            with self.subTest(mirror=mirror),self.assertRaisesRegex(RuntimeError,'Invalid APT mirror'):
+                config(apt_mirror=mirror)
 
     def test_create_collision_rejects_before_artifacts_or_write(self):
         with mock.patch.object(agent,'_exists',return_value=True),mock.patch.object(agent,'_lock',return_value=contextlib.nullcontext()), \
@@ -290,14 +299,55 @@ class AgentTests(unittest.TestCase):
     def test_cloud_init_uses_https_deb822_and_bounds_guest_apt_stalls(self):
         document=json.loads(agent._cloud_config(state()).split('\n',1)[1]);apt=document['apt']
         self.assertEqual(document['hostname'],'ai-dev')
-        self.assertFalse(apt['preserve_sources_list']);self.assertNotIn('mirror+file:',apt['sources_list']);self.assertNotIn('http://',apt['sources_list'])
-        stanzas=[dict(line.split(': ',1) for line in stanza.splitlines()) for stanza in apt['sources_list'].strip().split('\n\n')]
+        self.assertEqual(apt,{'preserve_sources_list':True})
+        files={item['path']:item for item in document['write_files']}
+        source=files['/etc/apt/sources.list.d/debian.sources']
+        self.assertNotIn('mirror+file:',source['content']);self.assertNotIn('http://',source['content'])
+        self.assertFalse(source.get('defer',False));self.assertFalse(source.get('append',False))
+        self.assertEqual(source['owner'],'root:root');self.assertEqual(source['permissions'],'0644')
+        self.assertTrue(files['/etc/apt/sources.list']['content'].startswith('#'))
+        stanzas=[dict(line.split(': ',1) for line in stanza.splitlines()) for stanza in source['content'].strip().split('\n\n')]
         self.assertEqual([s['Suites'] for s in stanzas],['trixie trixie-updates','trixie-security'])
         for stanza in stanzas:
             self.assertEqual(stanza['Components'],'main');self.assertEqual(stanza['Signed-By'],'/usr/share/keyrings/debian-archive-keyring.gpg')
         setting=document['write_files'][0]
         self.assertTrue(setting['path'].startswith('/etc/apt/apt.conf.d/'));self.assertEqual(setting['owner'],'root:root');self.assertEqual(setting['permissions'],'0644')
         for bound in ['Acquire::http::Timeout "15";','Acquire::https::Timeout "15";','Acquire::Retries "2";']:self.assertIn(bound,setting['content'])
+
+    def test_all_apt_mirrors_reach_cloud_and_firmware_sources_including_legacy_state(self):
+        for mirror,uris in {
+            'official':('https://deb.debian.org/debian','https://security.debian.org/debian-security'),
+            'tuna':('https://mirrors.tuna.tsinghua.edu.cn/debian','https://mirrors.tuna.tsinghua.edu.cn/debian-security'),
+            'ustc':('https://mirrors.ustc.edu.cn/debian','https://mirrors.ustc.edu.cn/debian-security'),
+            None:('https://deb.debian.org/debian','https://security.debian.org/debian-security'),
+        }.items():
+            with self.subTest(mirror=mirror):
+                s=state(config=config(),driver_spec=agent.gpu.driver_spec('6.12.113+deb13-amd64'))
+                if mirror is None:s['config'].pop('apt_mirror')
+                else:s['config']['apt_mirror']=mirror
+                cloud=json.loads(agent._cloud_config(s).split('\n',1)[1])
+                body=next(item['content'] for item in cloud['write_files'] if item['path'].endswith('/debian.sources'))
+                script=agent._driver_script(s);tree=ast.parse(script);compile(script,'<driver>','exec')
+                firmware=next(ast.literal_eval(node.value) for node in ast.walk(tree) if isinstance(node,ast.Assign)
+                              and any(isinstance(target,ast.Name) and target.id=='apt_body' for target in node.targets))
+                for content,component,suites in [(body,'main',['trixie trixie-updates','trixie-security']),
+                                                (firmware,'non-free-firmware',['trixie','trixie-security'])]:
+                    stanzas=[dict(line.split(': ',1) for line in stanza.splitlines()) for stanza in content.strip().split('\n\n')]
+                    self.assertEqual(tuple(stanza['URIs'] for stanza in stanzas),uris)
+                    self.assertEqual([stanza['Suites'] for stanza in stanzas],suites)
+                    for stanza in stanzas:
+                        self.assertEqual(stanza['Types'],'deb');self.assertEqual(stanza['Components'],component)
+                        self.assertEqual(stanza['Signed-By'],'/usr/share/keyrings/debian-archive-keyring.gpg')
+                    self.assertNotIn('backports',content);self.assertNotIn('trusted=yes',content)
+
+    def test_cli_accepts_preset_apt_mirror_and_defaults_official(self):
+        for extra,expected in [([], 'official'),(['--apt-mirror','tuna'],'tuna'),(['--apt-mirror','ustc'],'ustc')]:
+            with self.subTest(extra=extra),mock.patch.object(agent,'plan',return_value={'status':'PLAN_ONLY'}) as plan,contextlib.redirect_stdout(io.StringIO()):
+                agent.main(['plan','--vmid','103','--storage','pool','--bridge','vmbr0','--ssh-key',PUBLIC,*extra])
+            self.assertEqual(plan.call_args.args[0]['apt_mirror'],expected)
+        with mock.patch.object(agent,'plan') as plan,contextlib.redirect_stderr(io.StringIO()),self.assertRaises(SystemExit):
+            agent.main(['plan','--vmid','103','--storage','pool','--bridge','vmbr0','--ssh-key',PUBLIC,'--apt-mirror','https://example.invalid'])
+        plan.assert_not_called()
 
     def test_cli_accepts_static_network_fields_without_shell_split(self):
         with mock.patch.object(agent,'plan',return_value={'status':'PLAN_ONLY'}) as plan,contextlib.redirect_stdout(io.StringIO()):

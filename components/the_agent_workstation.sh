@@ -89,7 +89,9 @@ onepve_agent_number() {
 onepve_agent_wizard() {
   local action="$1" metadata defaults vmid name storage bridge cores memory disk
   local key_source public_key mac expected_ip gpu viewer answer confirmation apt_mirror
-  local network address='' gateway='' nameserver=''
+  local network address='' gateway='' nameserver='' policy management lan_allow audit_choice vlan
+  local dhcp_server='' isolation_gateway='' exception
+  local -a management_list exception_list
   local -a settings argv
   metadata="$(onepve_agent_resources)" || return
   defaults="$(python3 - "$metadata" <<'PY'
@@ -182,12 +184,16 @@ PY
   [[ "$gpu" == auto || "$gpu" == none ]] || onepve_pci_input "$gpu" || { printf '显卡选择无效。\n'; return 1; }
   read -r -p 'MAC（留空自动生成；重建可填写原MAC）：' mac || return
   [[ -z "$mac" || "$mac" =~ ^([[:xdigit:]]{2}:){5}[[:xdigit:]]{2}$ ]] || { printf 'MAC 格式无效。\n'; return 1; }
+  if [[ -z "$mac" ]]; then
+    mac="$(python3 -c 'import secrets; print("52:54:"+":".join("%02X"%value for value in secrets.token_bytes(4)))')" || return
+  fi
+  printf '本工作机MAC：%s（DHCP保留请使用此地址）。\n' "$mac"
   read -r -p '网络方式：dhcp自动分配、static静态地址 [dhcp]：' network || return
   network="${network:-dhcp}"
   case "$network" in
     dhcp)
       printf '保留MAC不保证DHCP分配原地址；需要固定SSH／FRPC目标时请使用静态地址或已有DHCP保留。\n'
-      read -r -p '期望IPv4地址（可空；仅核验，不会分配此地址）：' expected_ip || return
+      read -r -p '预留IPv4地址（须已设置DHCP保留；此处不会分配地址）：' expected_ip || return
       ;;
     static)
       read -r -p '静态IPv4地址／CIDR（例如192.168.1.20/24）：' address || return
@@ -224,6 +230,31 @@ except ValueError as error:
     raise SystemExit('网络配置无效：' + str(error))
 PY
   [[ $? -eq 0 ]] || return 1
+  printf '宿主侧网络策略：isolated默认阻止主动访问内网；lan显式允许内网。均仅支持固定IPv4、单网卡，IPv6关闭。\n'
+  read -r -p '网络策略：isolated隔离、lan允许内网 [isolated]：' policy || return
+  policy="${policy:-isolated}"
+  [[ "$policy" == isolated || "$policy" == lan ]] || { printf '网络策略无效。\n'; return 1; }
+  printf '管理来源填写VM实际看到的SSH客户端／跳板来源CIDR；FRPC转发时通常是转发机的内网地址/32。\n'
+  read -r -p '允许SSH管理的IPv4/CIDR（多个用空格分隔）：' management || return
+  if [[ "$network" == dhcp ]]; then
+    printf '请先在路由器保留该MAC对应的期望IPv4；地址变化时宿主规则会阻止联网。\n'
+    read -r -p 'DNS服务器（单个IPv4）：' nameserver || return
+    read -r -p 'DHCP网络的IPv4网关：' isolation_gateway || return
+    read -r -p 'DHCP服务器IPv4：' dhcp_server || return
+  fi
+  read -r -p '内网放行项（可空；IPv4/CIDR,tcp或udp,端口；多项空格分隔）：' lan_allow || return
+  read -r -p '开启TCP/UDP连接审计，保留72小时？[y/N]：' audit_choice || return
+  [[ -z "$audit_choice" || "$audit_choice" == n || "$audit_choice" == N || "$audit_choice" == y || "$audit_choice" == Y ]] || { printf '请选择y或N。\n'; return 1; }
+  read -r -p 'VLAN标签（可空，须已在网桥／路由器配置）：' vlan || return
+  [[ -z "$vlan" ]] || { onepve_agent_number "$vlan" 1 && (( 10#$vlan <= 4094 )); } || { printf 'VLAN标签无效。\n'; return 1; }
+  read -r -a management_list <<<"$management"
+  read -r -a exception_list <<<"$lan_allow"
+  argv+=(--network-policy "$policy")
+  for exception in "${management_list[@]}"; do argv+=(--management-cidr "$exception"); done
+  for exception in "${exception_list[@]}"; do argv+=(--lan-allow "$exception"); done
+  [[ "$audit_choice" != y && "$audit_choice" != Y ]] || argv+=(--connection-audit)
+  [[ -z "$vlan" ]] || argv+=(--vlan "$vlan")
+  [[ -z "$dhcp_server" ]] || argv+=(--dhcp-server "$dhcp_server" --isolation-gateway "$isolation_gateway")
   read -r -p '本机查看端口 [16080]：' viewer || return; viewer="${viewer:-16080}"
   onepve_agent_number "$viewer" 1024 && (( 10#$viewer <= 65535 )) || { printf '查看端口须为1024到65535。\n'; return 1; }
   argv+=(--vmid "$vmid" --name "$name" --storage "$storage" --bridge "$bridge"
@@ -231,8 +262,9 @@ PY
   [[ -z "$mac" ]] || argv+=(--mac "$mac")
   [[ -z "$expected_ip" ]] || argv+=(--expected-ip "$expected_ip")
   if [[ "$network" == static ]]; then
-    argv+=(--address "$address" --gateway "$gateway" --nameserver "$nameserver")
+    argv+=(--address "$address" --gateway "$gateway")
   fi
+  [[ -z "$nameserver" ]] || argv+=(--nameserver "$nameserver")
   if [[ "$action" == rebuild ]]; then
     onepve_menu_run agent rebuild "${argv[@]}" --confirm-vmid "$vmid" --dry-run || return
     read -r -p "确认无备份删除并重建此VM，请输入VMID $vmid：" confirmation || return
@@ -246,13 +278,35 @@ PY
   fi
 }
 
+onepve_agent_network_settings() {
+  local vmid="$1" policy audit_choice entries entry answer
+  local -a argv=(--vmid "$vmid") exceptions
+  printf '仅调整本工具新建工作机；应用时短暂断开该VM网络，失败保持断网，PVE控制台仍可用。\n'
+  read -r -p '网络策略：isolated隔离／lan允许内网（空保留）：' policy || return
+  [[ -z "$policy" ]] || argv+=(--network-policy "$policy")
+  read -r -p '连接审计：on开启／off关闭（空保留）：' audit_choice || return
+  [[ -z "$audit_choice" ]] || argv+=(--audit "$audit_choice")
+  read -r -p '替换内网放行项（空保留，clear清空；IPv4/CIDR,tcp或udp,端口）：' entries || return
+  if [[ "$entries" == clear ]]; then argv+=(--clear-lan-allow)
+  elif [[ -n "$entries" ]]; then
+    read -r -a exceptions <<<"$entries"
+    for entry in "${exceptions[@]}"; do argv+=(--lan-allow "$entry"); done
+  fi
+  (( ${#argv[@]} > 2 )) || { printf '未选择变更。\n'; return 0; }
+  onepve_menu_run agent network "${argv[@]}" --dry-run || return
+  read -r -p '应用该VM网络策略？[y/N]：' answer || return
+  [[ "$answer" != y && "$answer" != Y ]] || onepve_menu_run agent network "${argv[@]}"
+}
+
 the_agent_workstation() {
-  local choice vmid
+  local choice vmid answer job output
   while true; do
     printf '\n08 Agent 工作机：只使用03已准备的显卡，不修改宿主驱动\n'
     printf '%s\n' '1. 创建 Debian 13 工作机' '2. 查看状态和日志位置' \
       '3. 验收指定工作机' '4. 显式重建（删除原VM，不自动备份）' \
-      '5. 继续未完成的安装' '0. 返回'
+      '5. 继续未完成的安装' '6. 只读诊断（不重新验收或操作浏览器）' \
+      '7. 查看安装／驱动日志尾部' '8. 切换软件桌面' '9. 重试已有GPU' \
+      '10. 调整内网策略／白名单／可选审计' '11. 网络与审计状态' '12. 导出连接审计' '0. 返回'
     read -r -p '选择：' choice || return
     case "$choice" in
       1) onepve_agent_wizard create ;;
@@ -267,6 +321,30 @@ the_agent_workstation() {
         fi
         ;;
       4) onepve_agent_wizard rebuild ;;
+      6 | 7 | 8 | 9 | 10 | 11 | 12)
+        read -r -p 'VMID：' vmid || return
+        onepve_agent_number "$vmid" 100 || { printf 'VMID无效。\n'; continue; }
+        case "$choice" in
+          6) onepve_menu_run agent doctor --vmid "$vmid" ;;
+          7)
+            read -r -p '日志：install／driver／verify [install]：' job || return
+            onepve_menu_run agent logs --vmid "$vmid" --job "${job:-install}"
+            ;;
+          8 | 9)
+            read -r -p '切换可能重启该VM；继续？[y/N]：' answer || return
+            if [[ "$answer" == y || "$answer" == Y ]]; then
+              if [[ "$choice" == 8 ]]; then onepve_menu_run agent resume --vmid "$vmid" --gpu none
+              else onepve_menu_run agent resume --vmid "$vmid" --gpu auto; fi
+            fi
+            ;;
+          10) onepve_agent_network_settings "$vmid" ;;
+          11) onepve_menu_run agent network-status --vmid "$vmid" ;;
+          12)
+            read -r -p '导出CSV绝对路径（不能覆盖已有文件）：' output || return
+            onepve_menu_run agent audit-export --vmid "$vmid" --output "$output"
+            ;;
+        esac
+        ;;
       0 | 00 | '') return ;;
       *) printf '选择无效。\n' ;;
     esac

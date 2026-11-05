@@ -66,6 +66,7 @@ class JobEtaTests(unittest.TestCase):
         with mock.patch.object(common,'_progress',None),contextlib.redirect_stderr(output), \
              mock.patch.object(common.threading,'Thread'),common.progress_session(), \
              mock.patch.object(agent,'Qga',return_value=q),mock.patch.object(agent,'_save'), \
+             mock.patch.object(agent,'_job_execution',return_value={'stopped':False,'boot_id':'same-boot'}), \
              mock.patch.object(agent.time,'monotonic',side_effect=lambda:now[0]), \
              mock.patch.object(agent.time,'sleep',side_effect=sleep), \
              mock.patch.object(agent,'_job_log_tail',side_effect=samples) as tail:

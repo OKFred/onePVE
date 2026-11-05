@@ -324,7 +324,10 @@ def download_verified(url, path, expected, algorithm='sha256'):
 
 def _fnm_download(path):
     """GitHub's fixed release is trusted on first HTTPS download, then locally pinned."""
-    record = CACHE_ROOT / 'fnm-download.json'
+    record = CACHE_ROOT / ('fnm-download-' + FNM_VERSION + '.json')
+    legacy = CACHE_ROOT / 'fnm-download.json'
+    if not os.path.lexists(record) and _record_matches(legacy, dict(url=FNM_URL, version=FNM_VERSION)):
+        record = legacy
     if os.path.lexists(record):
         need(not record.is_symlink(), 'Refusing redirected fnm download record')
         data = json.loads(record.read_text())
@@ -434,8 +437,27 @@ def _extract_node(archive, destination):
             need((destination / name).resolve(strict=True).is_relative_to(destination.resolve()), 'Invalid Node symlink chain')
 
 
+def _record_matches(path, expected):
+    if not path.is_file() or path.is_symlink():
+        return False
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return False
+    return isinstance(data, dict) and all(data.get(key) == value for key, value in expected.items())
+
+
+def _cache_directory(name, manifest, expected):
+    key = hashlib.sha256(json.dumps(expected, sort_keys=True, separators=(',', ':')).encode()).hexdigest()[:16]
+    target, legacy = CACHE_ROOT / (name + '-' + key), CACHE_ROOT / name
+    if (not os.path.lexists(target) and legacy.is_dir() and not legacy.is_symlink()
+            and _record_matches(legacy / manifest, expected)):
+        return legacy
+    return target
+
+
 def _tool_node(archive, archive_digest):
-    target = CACHE_ROOT / 'tool-node'
+    target = _cache_directory('tool-node', 'tool-manifest.json', {'archive_sha256': archive_digest})
     manifest = target / 'tool-manifest.json'
     if os.path.lexists(target):
         need(target.is_dir() and not target.is_symlink(), 'Cached Node tool is redirected')
@@ -458,7 +480,7 @@ def _tool_node(archive, archive_digest):
 
 
 def _runtime_cache():
-    target = CACHE_ROOT / 'runtime-cache'
+    target = _cache_directory('runtime-cache', 'runtime-manifest.json', VERSIONS)
     manifest = target / 'runtime-manifest.json'
     if os.path.lexists(target):
         progress('校验 Node.js、MCP 和 Codex 运行时缓存')

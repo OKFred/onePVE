@@ -40,7 +40,7 @@ class StaleRecordTests(unittest.TestCase):
         self.stack.enter_context(mock.patch.object(agent, '_continue', side_effect=lambda state: state))
         self.stack.enter_context(mock.patch.object(agent.artifacts, 'image_options', return_value={
             'latest': {'version': 'fixed'}, 'cached': [], 'lookup_error': None, 'cache_errors': []}))
-        self.config = agent.normalize(dict(vmid=103, storage='pool', bridge='vmbr0', ssh_key=PUBLIC, gpu='none'))
+        self.config = agent.normalize(dict(vmid=103, storage='pool', bridge='vmbr0', ssh_key=PUBLIC, gpu='none',network_policy='legacy'))
         self.path = agent._state_path(103)
         self.path.parent.mkdir(mode=0o700, parents=True)
         self.path.parent.chmod(0o700)

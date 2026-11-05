@@ -163,6 +163,10 @@ def vm_config(vmid):
     return dict(line.split(': ', 1) for line in text.splitlines() if ': ' in line)
 
 
+class GuestAgentError(RuntimeError):
+    """A guest-agent protocol error does not prove a guest workload failed."""
+
+
 class Qga:
     def __init__(self, vmid):
         self.socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -197,7 +201,7 @@ class Qga:
             if response.get('id', self.sequence) != self.sequence:
                 continue
             if 'error' in response:
-                raise RuntimeError('Guest Agent: ' + str(response['error']))
+                raise GuestAgentError('Guest Agent: ' + str(response['error']))
             return response['return']
 
     def execute(self, argv, timeout=60):

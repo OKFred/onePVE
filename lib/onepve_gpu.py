@@ -282,19 +282,28 @@ def _module_field(name, field, kernel):
 
 
 def _download_source(spec, cache):
+    need(cache.parent.resolve() == cache.parent.absolute(), 'Driver cache parent is redirected')
     cache.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    if cache.exists():
+    if os.path.lexists(cache):
         need(not cache.is_symlink() and hashlib.sha256(cache.read_bytes()).hexdigest() == spec['sha256'], 'Cached driver archive checksum differs')
         return
-    temporary = cache.with_suffix(cache.suffix + '.partial')
-    need(not temporary.exists(), 'Interrupted source download exists; inspect it before retrying')
-    with urllib.request.urlopen(spec['url'], timeout=60) as response, temporary.open('xb') as output:
-        digest, size = hashlib.sha256(), 0
-        while block := response.read(1024 * 1024):
-            size += len(block); need(size <= 32 * 1024 * 1024, 'Driver source archive exceeds expected limit')
-            digest.update(block); output.write(block)
-    need(digest.hexdigest() == spec['sha256'], 'Downloaded driver source checksum differs')
-    temporary.replace(cache)
+    descriptor, name = tempfile.mkstemp(prefix='.' + cache.name + '.partial-', dir=cache.parent)
+    temporary = Path(name)
+    try:
+        with os.fdopen(descriptor, 'wb') as output, urllib.request.urlopen(spec['url'], timeout=60) as response:
+            digest, size = hashlib.sha256(), 0
+            while block := response.read(1024 * 1024):
+                size += len(block); need(size <= 32 * 1024 * 1024, 'Driver source archive exceeds expected limit')
+                digest.update(block); output.write(block)
+            output.flush(); os.fsync(output.fileno())
+        need(size > 0 and digest.hexdigest() == spec['sha256'], 'Downloaded driver source checksum differs')
+        try:
+            os.link(temporary, cache)
+        except FileExistsError:
+            need(not cache.is_symlink() and hashlib.sha256(cache.read_bytes()).hexdigest() == spec['sha256'],
+                 'Driver cache appeared with different content; not overwritten')
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _extract_source(archive, destination):

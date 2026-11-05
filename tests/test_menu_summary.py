@@ -62,6 +62,16 @@ class MenuSummaryTests(unittest.TestCase):
         for expected in ['0000:00:02.1', '0000:00:02.0', 'vfio-pci', 'VM=103', 'PID=42']:
             self.assertIn(expected, output)
 
+    def test_network_summary_highlights_isolation_audit_and_pending_without_raw_json(self):
+        value=dict(phase='READY_SOFTWARE',config=dict(network_policy='isolated',connection_audit=False,
+            management_cidrs=['192.168.1.1/32'],lan_allow=['192.168.1.2/32,tcp,8006']),
+            network_pending={'config':{}},network=dict(table_present=True,rules_match=False,drop_packets_since_rule_load=7),
+            audit=dict(active=False,coverage_gap={'reason':'collector_stopped'}))
+        code,output=self.summary(value)
+        for expected in ['默认隔离内网','关闭（默认）','192.168.1.2/32,tcp,8006','规则读回校验: 未通过','网络变更待恢复','collector_stopped']:
+            self.assertIn(expected,output)
+        self.assertNotIn('"network_pending"',output);self.assertEqual(code,0)
+
     def test_rebuild_summary_highlights_exact_destructive_vmid(self):
         code, output = self.summary({'status':'PLAN_ONLY','destructive_vmid':219}, action='rebuild', args=['--dry-run'])
         self.assertEqual(code, 0)

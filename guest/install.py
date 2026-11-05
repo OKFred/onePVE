@@ -100,8 +100,12 @@ def chown_tree(path, owner):
 
 
 def run(args, **kwargs):
-    print('[onePVE guest] ' + shlex.join(map(str, args)), flush=True)
-    return subprocess.run(list(map(str, args)), check=True, **kwargs)
+    args = list(map(str, args))
+    if args[0] == 'apt-get':
+        args[1:1] = ['-o', 'APT::Status-Fd=1']
+        kwargs['env'] = dict(os.environ if kwargs.get('env') is None else kwargs['env'], LC_ALL='C')
+    print('[onePVE guest] ' + shlex.join(args), flush=True)
+    return subprocess.run(args, check=True, **kwargs)
 
 
 def download(url, destination):

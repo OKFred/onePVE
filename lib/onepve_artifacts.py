@@ -8,6 +8,7 @@ except ImportError:
 import hashlib
 import http.client
 import json
+import math
 import os
 from pathlib import Path, PurePosixPath
 import platform
@@ -19,6 +20,7 @@ import struct
 import sys
 import tarfile
 import tempfile
+import time
 import urllib.parse
 import urllib.request
 import zipfile
@@ -269,10 +271,30 @@ def _download(url, path, expected, algorithm, before_commit=None):
             length = response.headers.get('Content-Length') if hasattr(response, 'headers') else None
             size = int(length) if length and re.fullmatch(r'[0-9]+', length) else None
             progress('下载并校验文件：' + path.name, '预计大小：' + _format_size(size))
-            while block := response.read(1024 * 1024):
-                count += len(block)
-                need(count <= MAX_DOWNLOAD_BYTES, 'Artifact exceeds the download size limit')
-                digest.update(block); output.write(block)
+            started = last_report = time.monotonic()
+            while True:
+                block = response.read(1024 * 1024)
+                if block:
+                    count += len(block)
+                    need(count <= MAX_DOWNLOAD_BYTES, 'Artifact exceeds the download size limit')
+                    digest.update(block); output.write(block)
+                now = time.monotonic()
+                if not block or now - last_report >= 5:
+                    elapsed = now - started
+                    speed = count / elapsed if elapsed > 0 else 0
+                    speed = speed if math.isfinite(speed) and speed > 0 else 0
+                    detail = ('已下载：' + _format_size(count) + ' / 总大小：' + _format_size(size)
+                              + ' | 速度：' + ('%.1f KiB/s' % (speed / 1024) if speed else '未知'))
+                    remaining = None
+                    if size and count <= size:
+                        detail += ' | %.1f%%' % (100 * count / size)
+                        if speed:
+                            remaining = (size - count) / speed
+                    progress('下载文件：' + path.name, detail, remaining=remaining)
+                    last_report = now
+                if not block:
+                    break
+            progress('校验下载文件：' + path.name, '文件大小：' + _format_size(count))
             output.flush(); os.fsync(output.fileno())
         actual = digest.hexdigest()
         need(expected is None or actual == expected, 'Downloaded artifact checksum differs: ' + path.name)
@@ -284,8 +306,11 @@ def _download(url, path, expected, algorithm, before_commit=None):
             os.link(part, path)
         except FileExistsError:
             need(_digest(path, algorithm) == actual, 'Artifact appeared with different content; not overwritten')
-        progress('下载校验完成：' + path.name, '文件大小：' + _format_size(count))
+        progress('下载校验完成：' + path.name, '文件大小：' + _format_size(count), remaining=0)
         return path
+    except BaseException:
+        progress('下载或校验失败：' + path.name, '已下载：' + _format_size(count))
+        raise
     finally:
         part.unlink(missing_ok=True)
 

@@ -298,6 +298,45 @@ onepve_agent_network_settings() {
   [[ "$answer" != y && "$answer" != Y ]] || onepve_menu_run agent network "${argv[@]}"
 }
 
+onepve_sls_menu() {
+  local choice account endpoint project logstore credentials raw requests answer
+  while true; do
+    printf '\nSLS云端审计：宿主全部已开启本地审计的工作机共用预算；默认关闭。\n'
+    printf '%s\n' '1. 查看状态和剩余预算（只读）' '2. 配置已有SLS目标和宿主凭据文件' \
+      '3. 核实本月共享免费额度后批准上传预算' '4. 检查云端配置并启用／恢复上传' \
+      '5. 停止云端上传（保留本地审计和预算）' '6. 立即上传一批' '0. 返回'
+    read -r -p '选择：' choice || return
+    case "$choice" in
+      1) onepve_menu_run sls status ;;
+      2)
+        printf '仅连接已有Standard、按使用功能计费、1 Shard、3天保留、无索引目标；本步骤不访问云端。\n'
+        read -r -p '阿里云主账号ID（16位）：' account || return
+        read -r -p '接入点（如cn-hangzhou.log.aliyuncs.com）：' endpoint || return
+        read -r -p 'Project：' project || return
+        read -r -p 'Logstore：' logstore || return
+        read -r -p 'PVE宿主凭据JSON绝对路径（root专有，勿粘贴密钥）：' credentials || return
+        onepve_menu_run sls configure --account-id "$account" --endpoint "$endpoint" --project "$project" --logstore "$logstore" --credential-file "$credentials"
+        ;;
+      3)
+        printf '免费额度由整个账号共享；云账单有延迟且无硬扣费上限。请先核实余额、其他Project和Shard用量。\n'
+        printf '仅批准可分配给本宿主的剩余额度；本工具不支持当月补回预算，新月停止并重新核实。\n'
+        read -r -p '月原始上传预算 MiB [100，最高200]：' raw || return;raw="${raw:-100}"
+        read -r -p '月请求预算（失败和元数据检查也计入）[100000]：' requests || return;requests="${requests:-100000}"
+        read -r -p '已核实本月账号共享剩余额度，并为本宿主预留以上额度？[y/N]：' answer || return
+        [[ "$answer" != y && "$answer" != Y ]] || onepve_menu_run sls approve-budget --raw-mib "$raw" --requests "$requests" --account-free-verified
+        ;;
+      4)
+        read -r -p '使用已批准预算检查并启用上传（未知批次可能重复）？[y/N]：' answer || return
+        [[ "$answer" != y && "$answer" != Y ]] || onepve_menu_run sls enable
+        ;;
+      5) onepve_menu_run sls disable ;;
+      6) onepve_menu_run sls upload ;;
+      0 | '') return ;;
+      *) printf '选择无效。\n' ;;
+    esac
+  done
+}
+
 the_agent_workstation() {
   local choice vmid answer job output
   while true; do
@@ -306,7 +345,7 @@ the_agent_workstation() {
       '3. 验收指定工作机' '4. 显式重建（删除原VM，不自动备份）' \
       '5. 继续未完成的安装' '6. 只读诊断（不重新验收或操作浏览器）' \
       '7. 查看安装／驱动日志尾部' '8. 切换软件桌面' '9. 重试已有GPU' \
-      '10. 调整内网策略／白名单／可选审计' '11. 网络与审计状态' '12. 导出连接审计' '0. 返回'
+      '10. 调整内网策略／白名单／可选审计' '11. 网络与审计状态' '12. 导出连接审计' '13. SLS云端审计（可选，默认关闭）' '0. 返回'
     read -r -p '选择：' choice || return
     case "$choice" in
       1) onepve_agent_wizard create ;;
@@ -321,6 +360,7 @@ the_agent_workstation() {
         fi
         ;;
       4) onepve_agent_wizard rebuild ;;
+      13) onepve_sls_menu ;;
       6 | 7 | 8 | 9 | 10 | 11 | 12)
         read -r -p 'VMID：' vmid || return
         onepve_agent_number "$vmid" 100 || { printf 'VMID无效。\n'; continue; }

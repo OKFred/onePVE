@@ -456,7 +456,7 @@ def _create_vm(state):
             net='virtio'+('='+cfg['mac'] if cfg['mac'] else '')+',bridge='+cfg['bridge']
             run(['qm','create',vmid,'--name',cfg['name'],'--description','onePVE owner='+state['owner'],
                  '--tags','onepve-agent','--cores',str(cfg['cores']),'--memory',str(cfg['memory']),'--balloon','0',
-                 '--cpu','host','--machine','q35','--bios','ovmf','--scsihw','virtio-scsi-single','--vga','virtio',
+                 '--cpu','host','--ostype','l26','--machine','q35','--bios','ovmf','--scsihw','virtio-scsi-single','--vga','virtio',
                  '--serial0','socket','--agent','enabled=1','--onboot','1','--net0',net],timeout=None)
             _owned(state)
         _save(state,'VM_CREATED')

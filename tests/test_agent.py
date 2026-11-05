@@ -519,7 +519,7 @@ class AgentTests(unittest.TestCase):
              mock.patch.object(agent,'_snippet',return_value='pool:snippets/onepve-'+s['owner']),mock.patch.object(agent,'_wait_cloud'):
             agent._create_vm(s)
         create=calls[0]
-        for flag,value in [('--cores','4'),('--memory','8192'),('--balloon','0'),('--bios','ovmf'),('--machine','q35'),('--vga','virtio'),('--scsihw','virtio-scsi-single')]:
+        for flag,value in [('--cores','4'),('--memory','8192'),('--balloon','0'),('--ostype','l26'),('--bios','ovmf'),('--machine','q35'),('--vga','virtio'),('--scsihw','virtio-scsi-single')]:
             self.assertEqual(create[create.index(flag)+1],value)
         self.assertEqual(s['phase'],'CLOUD_READY');self.assertIn('discard=on',current['scsi0'])
         self.assertIn(['qm','disk','resize','103','scsi0','32G'],calls)

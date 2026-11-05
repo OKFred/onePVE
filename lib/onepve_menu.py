@@ -125,7 +125,6 @@ def agent_record(data):
     show('状态', data.get('phase', data.get('status')))
     previous = data.get('previous_record')
     if isinstance(previous, dict):
-        banner('【旧记录待确认】VM 已删除，继续创建前将询问是否清理旧记录；镜像和驱动缓存保留。', 33)
         show('旧记录', previous.get('path'))
         show('旧记录阶段', previous.get('phase'))
     if data.get('previous_record_cleared'):

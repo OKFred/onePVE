@@ -419,6 +419,18 @@ class MenuTests(unittest.TestCase):
         self.assertEqual(self.calls(result.stderr),[['agent','resume','--vmid','219','--gpu','none'],
             ['agent','resume','--vmid','219','--gpu','auto']])
 
+    def test_sls_submenu_defaults_to_readonly_and_declines_paid_activation(self):
+        code=self.source('components/the_agent_workstation.sh')+self.mock_cli()+'the_agent_workstation'
+        result=self.shell(code,'13\n1\n\n3\n\n\n\n4\nn\n0\n0\n')
+        self.assertEqual(self.calls(result.stderr),[['sls','status']])
+        self.assertIn('免费额度',result.stdout);self.assertIn('默认关闭',result.stdout)
+
+    def test_sls_explicit_budget_enable_and_disable_keep_arguments_separate(self):
+        code=self.source('components/the_agent_workstation.sh')+self.mock_cli()+'onepve_sls_menu'
+        result=self.shell(code,'3\n50\n50000\ny\n\n4\ny\n\n5\n\n0\n')
+        self.assertEqual(self.calls(result.stderr),[['sls','approve-budget','--raw-mib','50','--requests','50000','--account-free-verified'],
+            ['sls','enable'],['sls','disable']])
+
     def test_agent_apt_mirror_default_and_presets_reach_plan_and_apply(self):
         for action in ['create','rebuild']:
             for choice,expected in [('', 'tuna'),('tuna','tuna'),('ustc','ustc'),('official','official')]:

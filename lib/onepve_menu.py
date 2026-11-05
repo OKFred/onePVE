@@ -247,6 +247,21 @@ def summarize(data, kind, action, arguments, failed=False):
         return gpu_summary(data, action, '--dry-run' in arguments, failed)
     if not isinstance(data, dict):
         raise ValueError('结果不是预期的 JSON 对象')
+    if kind=='sls':
+        banner('【SLS】'+str(data.get('status','预算已批准' if data.get('approved') else '未确认')),31 if failed else 33 if data.get('status') in {'HALTED','ATTENTION'} else 32)
+        for field,label in [('endpoint','地域接入点'),('project','Project'),('logstore','Logstore'),('last_success_utc','最近上传'),('rows','本次上传条数'),('error','错误')]:
+            show(label,data.get(field))
+        quota=data.get('budget') or data
+        show('预算账期（北京时间）',quota.get('month'))
+        if 'approved' in quota:show('本月预算','已批准（仅本宿主）' if quota['approved'] else '未批准，不能上传')
+        for field,label in [('raw_bytes_remaining','剩余原始上传字节'),('requests_remaining','剩余请求数')]:show(label,quota.get(field))
+        halt=data.get('halt') or {}
+        show('上传已停止',halt.get('reason'))
+        if 'timer_active' in data:show('自动上传服务','已启用定时器' if data['timer_active'] else '未运行，请检查')
+        if 'units_match' in data:show('服务配置校验','通过' if data['units_match'] else '未通过，请检查')
+        if data.get('pending'):show('未确认批次','需显式重新启用；可能重复，预算不退回')
+        print('费用边界：本工具预算不等于阿里云账号费用上限；共享免费额度需按月核实。')
+        return 1 if failed or data.get('status')=='ERROR' else 0
     if (action == 'plan' or '--dry-run' in arguments) and data.get('status') != 'PLAN_ONLY':
         if data.get('status') == 'ERROR':
             print('【执行失败】预检未完成。')

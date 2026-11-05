@@ -72,6 +72,21 @@ class MenuSummaryTests(unittest.TestCase):
             self.assertIn(expected,output)
         self.assertNotIn('"network_pending"',output);self.assertEqual(code,0)
 
+    def test_sls_summary_explains_host_budget_without_printing_credentials_or_raw_json(self):
+        value=dict(status='HALTED',enabled=True,project='onepve-test',logstore='connections',
+            budget=dict(month='2026-11',approved=True,raw_bytes_remaining=17,requests_remaining=8),
+            halt={'reason':'CostLimitError'},access_key_secret='never-show-this',timer_active=False,units_match=True)
+        code,output=self.summary(value,kind='sls')
+        for expected in ['HALTED','2026-11','17','8','CostLimitError','账号费用上限','未运行']:
+            self.assertIn(expected,output)
+        self.assertEqual(code,0);self.assertNotIn('never-show-this',output);self.assertNotIn('"budget"',output)
+
+    def test_cli_routes_the_optional_sls_group(self):
+        import onepve_sls
+        with mock.patch.object(onepve_sls,'main',return_value=0) as entry:
+            self.assertEqual(cli.main(['sls','status']),0)
+        entry.assert_called_once_with(['status'])
+
     def test_rebuild_summary_highlights_exact_destructive_vmid(self):
         code, output = self.summary({'status':'PLAN_ONLY','destructive_vmid':219}, action='rebuild', args=['--dry-run'])
         self.assertEqual(code, 0)

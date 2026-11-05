@@ -1,4 +1,6 @@
 import importlib.util
+import hashlib
+import io
 import json
 from pathlib import Path
 import subprocess
@@ -143,6 +145,44 @@ class GpuTests(unittest.TestCase):
             item=tarfile.TarInfo('../escape');item.size=0;stream.addfile(item)
         with self.assertRaisesRegex(RuntimeError,'archive paths'):gpu._extract_source(archive,self.root/'out')
         self.assertFalse((self.root/'out').exists())
+
+    def test_source_download_interrupt_can_retry_without_removing_older_partials(self):
+        cache=self.root/'cache/source.tar.gz';cache.parent.mkdir()
+        old_partial=cache.with_suffix('.tar.gz.partial');old_partial.write_bytes(b'older interrupted input')
+        data=b'verified driver source';spec={'url':'https://example.test/source','sha256':hashlib.sha256(data).hexdigest()}
+        broken=mock.MagicMock();broken.__enter__.return_value=broken
+        broken.read.side_effect=[b'half',OSError('connection interrupted')]
+        with mock.patch.object(gpu.urllib.request,'urlopen',return_value=broken):
+            with self.assertRaisesRegex(OSError,'interrupted'):gpu._download_source(spec,cache)
+        self.assertFalse(cache.exists())
+        self.assertEqual(list(cache.parent.glob('.source.tar.gz.partial-*')),[])
+        self.assertEqual(old_partial.read_bytes(),b'older interrupted input')
+        with mock.patch.object(gpu.urllib.request,'urlopen',return_value=io.BytesIO(data)):
+            gpu._download_source(spec,cache)
+        self.assertEqual(cache.read_bytes(),data)
+        self.assertEqual(old_partial.read_bytes(),b'older interrupted input')
+        self.assertEqual(list(cache.parent.glob('.source.tar.gz.partial-*')),[])
+        with mock.patch.object(gpu.urllib.request,'urlopen',side_effect=AssertionError('network')):
+            gpu._download_source(spec,cache)
+
+    def test_source_download_checksum_and_size_fail_without_publishing(self):
+        cache=self.root/'cache/source.tar.gz';spec={'url':'https://example.test/source','sha256':'a'*64}
+        for data,message in [(b'wrong','checksum differs'),(b'x'*(32*1024**2+1),'expected limit')]:
+            with self.subTest(message=message),mock.patch.object(gpu.urllib.request,'urlopen',return_value=io.BytesIO(data)):
+                with self.assertRaisesRegex(RuntimeError,message):gpu._download_source(spec,cache)
+            self.assertFalse(cache.exists())
+            self.assertEqual(list(cache.parent.iterdir()),[])
+
+    def test_racing_source_cache_is_not_replaced(self):
+        cache=self.root/'cache/source.tar.gz';data=b'verified source'
+        spec={'url':'https://example.test/source','sha256':hashlib.sha256(data).hexdigest()}
+        def appear(_url,**_kwargs):
+            cache.write_bytes(b'foreign input')
+            return io.BytesIO(data)
+        with mock.patch.object(gpu.urllib.request,'urlopen',side_effect=appear):
+            with self.assertRaisesRegex(RuntimeError,'not overwritten'):gpu._download_source(spec,cache)
+        self.assertEqual(cache.read_bytes(),b'foreign input')
+        self.assertEqual(list(cache.parent.glob('.source.tar.gz.partial-*')),[])
 
     def test_vermagic_and_companion_symbol_crcs(self):
         modules=[]

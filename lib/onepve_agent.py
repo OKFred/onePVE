@@ -15,6 +15,7 @@ import struct
 import subprocess
 import sys
 import tarfile
+import tempfile
 import time
 import uuid
 try:
@@ -25,7 +26,9 @@ except ImportError:
 import onepve_artifacts as artifacts
 import onepve_gpu as gpu
 import onepve_driver_cache as driver_cache
-from onepve_common import (APT_MIRRORS, STATE_ROOT, Qga, atomic_json, node_name, pve_get,
+import onepve_network as network
+import onepve_audit as audit
+from onepve_common import (APT_MIRRORS, STATE_ROOT, GuestAgentError, Qga, atomic_json, node_name, pve_get,
                           progress, progress_enabled, progress_session, repo_root, require_root, run, vm_config)
 
 AGENT_STATE = STATE_ROOT / 'agent'
@@ -178,20 +181,20 @@ def normalize(values):
         need(isinstance(values['address'],str) and '/' in values['address'],'Static address requires an explicit IPv4 CIDR')
         try:interface=ipaddress.IPv4Interface(values['address'])
         except ValueError as error:raise RuntimeError('Static address must be an IPv4 CIDR') from error
-        address=interface.ip;network=interface.network
+        address=interface.ip;subnet=interface.network
         need(not(address.is_unspecified or address.is_loopback or address.is_multicast or address.is_reserved),'Static address is not a usable host address')
-        need(network.prefixlen>=31 or address not in {network.network_address,network.broadcast_address},'Static address is the network/broadcast address')
+        need(subnet.prefixlen>=31 or address not in {subnet.network_address,subnet.broadcast_address},'Static address is the network/broadcast address')
         need(values['gateway'],'Static address requires --gateway')
         gateway=ipaddress.IPv4Address(values['gateway'])
-        need(gateway in network and gateway!=address,'Static gateway must be another address in the same subnet')
-        need(network.prefixlen>=31 or gateway not in {network.network_address,network.broadcast_address},'Gateway is the network/broadcast address')
+        need(gateway in subnet and gateway!=address,'Static gateway must be another address in the same subnet')
+        need(subnet.prefixlen>=31 or gateway not in {subnet.network_address,subnet.broadcast_address},'Gateway is the network/broadcast address')
         need(not values['expected_ip'] or values['expected_ip']==str(address),'Expected IP must match the static address')
         values['address']=str(interface);values['expected_ip']=str(address)
     else:need(not values['gateway'],'--gateway requires a static --address CIDR')
     values['ssh_key']=public_key(values['ssh_key'])
     need(values['gpu'] in {'auto','none'} or gpu.canonical_bdf(values['gpu']), 'Invalid GPU selection')
     if values['gpu'] not in {'auto','none'}: values['gpu']=gpu.canonical_bdf(values['gpu'])
-    return values
+    return network.normalize(values)
 
 
 def _exists(vmid):
@@ -232,11 +235,12 @@ def plan(config, rebuild=False):
     previous=_previous_record(config['vmid']) if not rebuild else None
     if previous:_require_missing_vmid(config['vmid'])
     resources=_resources(config);selected=_select_gpu(config)
+    netplan=network.preflight(config,status()['vms'])
     images=artifacts.image_options();image=images['latest'] or images['cached'][0]
     return dict(status='PLAN_ONLY',config=config,resources=resources,image=image,
                 previous_record=previous,
                 cached_images=images['cached'],image_lookup_error=images['lookup_error'],image_cache_errors=images['cache_errors'],
-                selected_gpu=selected,mode='wayland' if selected else 'x11',
+                selected_gpu=selected,mode='wayland' if selected else 'x11',network=netplan,
                 host_gpu_driver_changes=False,host_reboot=False,backup_existing_vm=False,
                 destructive_vmid=config['vmid'] if rebuild else None)
 
@@ -454,6 +458,8 @@ def _create_vm(state):
         if _exists(state['vmid']):_owned(state)
         else:
             net='virtio'+('='+cfg['mac'] if cfg['mac'] else '')+',bridge='+cfg['bridge']
+            if cfg.get('vlan'):net+=',tag='+str(cfg['vlan'])
+            if network.managed(cfg):net+=',link_down=1'
             run(['qm','create',vmid,'--name',cfg['name'],'--description','onePVE owner='+state['owner'],
                  '--tags','onepve-agent','--cores',str(cfg['cores']),'--memory',str(cfg['memory']),'--balloon','0',
                  '--cpu','host','--ostype','l26','--machine','q35','--bios','ovmf','--scsihw','virtio-scsi-single','--vga','virtio',
@@ -481,8 +487,8 @@ def _create_vm(state):
             run(['qm','set',vmid,'--efidisk0',cfg['storage']+':0,efitype=4m,pre-enrolled-keys=0,format='+resource['disk_format']],timeout=None)
         if 'ide2' not in current:
             run(['qm','set',vmid,'--ide2',cfg['storage']+':cloudinit'],timeout=None)
-        network='ip='+cfg['address']+',gw='+cfg['gateway'] if cfg.get('address') else 'ip=dhcp'
-        command=['qm','set',vmid,'--cicustom','user='+seed,'--ipconfig0',network,'--boot','order=scsi0']
+        network_config='ip='+cfg['address']+',gw='+cfg['gateway'] if cfg.get('address') else 'ip=dhcp'
+        command=['qm','set',vmid,'--cicustom','user='+seed,'--ipconfig0',network_config,'--boot','order=scsi0']
         if cfg.get('nameserver'):command.extend(['--nameserver',cfg['nameserver']])
         run(command,timeout=None)
         run(['qm','disk','resize',vmid,'scsi0',str(cfg['disk'])+'G'],timeout=None)
@@ -490,6 +496,7 @@ def _create_vm(state):
     if state['phase']=='CLOUD_WAIT':
         current=_owned(state)
         need('scsi0' in current and state['owner'] in current.get('cicustom',''),'Cloud seed/disk does not belong to this operation')
+        if network.managed(cfg):_network_ready(state)
         if run(['qm','status',vmid]).stdout.strip()=='status: stopped':run(['qm','start',vmid],timeout=None)
         _wait_cloud(state)
         _save(state,'CLOUD_READY')
@@ -550,22 +557,55 @@ print(json.dumps({'status':'DESKTOP_READY','boot_id':Path('/proc/sys/kernel/rand
 def _bundle(state):
     _validate_artifacts(state['artifacts'])
     directory=_state_path(state['vmid']).parent
+    need(re.fullmatch('[0-9a-f]{32}',state['owner']) and directory.resolve()==directory,
+         'Unsafe bundle ownership or state directory')
+    if os.name=='posix':
+        need(directory.stat().st_uid==0 and not directory.stat().st_mode&0o077,'Bundle directory must be root-private')
+    def sync_directory():
+        if os.name!='posix':return
+        descriptor=os.open(directory,os.O_RDONLY|os.O_DIRECTORY)
+        try:os.fsync(descriptor)
+        finally:os.close(descriptor)
     path=directory/('payload-'+state['owner']+'.tar.gz')
     if 'bundle_sha256' in state:
-        need(path.is_file() and _digest(path)==state['bundle_sha256'],'Staged source bundle changed')
+        need(not path.is_symlink() and path.is_file() and _digest(path)==state['bundle_sha256'],'Staged source bundle changed')
         return path
-    need(not path.exists(),'Unrecorded bundle exists; inspect before replacing')
+    if os.path.lexists(path):
+        pending=state.get('bundle_pending') or {}
+        need(pending.get('owner')==state['owner'] and pending.get('path')==str(path)
+             and not path.is_symlink() and path.is_file() and _digest(path)==pending.get('sha256')
+             and path.stat().st_size==pending.get('bytes'),
+             'Unrecorded bundle lacks matching publication proof; retained for inspection')
+        if os.name=='posix':need(path.stat().st_uid==0 and not path.stat().st_mode&0o077,'Unsafe pending bundle file')
+        _save(state,bundle_sha256=pending['sha256'],bundle_bytes=pending['bytes'],bundle_pending=None)
+        return path
     root=repo_root();runtime=Path(state['artifacts']['runtime_cache'])
-    with tarfile.open(path,'x:gz',compresslevel=1) as stream:
-        for source in sorted((root/'guest').rglob('*')):
-            if source.is_file() and '__pycache__' not in source.parts and source.suffix!='.pyc':
-                stream.add(source,arcname='source/'+str(source.relative_to(root)).replace('\\','/'),recursive=False)
-        for name in ['onepve_common.py','onepve_gpu.py','onepve_driver_cache.py']:
-            stream.add(root/'lib'/name,arcname='source/lib/'+name,recursive=False)
-        stream.add(runtime,arcname='cache',recursive=True)
-        for version,source in state['artifacts']['driver_sources'].items():
-            stream.add(source,arcname='drivers/'+version+'.tar.gz',recursive=False)
-    path.chmod(0o600);_save(state,bundle_sha256=_digest(path),bundle_bytes=path.stat().st_size)
+    descriptor,temporary=tempfile.mkstemp(prefix='.payload-'+state['owner']+'.part-',dir=directory)
+    temporary=Path(temporary)
+    try:
+        with os.fdopen(descriptor,'wb') as output:
+            with tarfile.open(fileobj=output,mode='w:gz',compresslevel=1) as stream:
+                for source in sorted((root/'guest').rglob('*')):
+                    if source.is_file() and '__pycache__' not in source.parts and source.suffix!='.pyc':
+                        stream.add(source,arcname='source/'+str(source.relative_to(root)).replace('\\','/'),recursive=False)
+                for name in ['onepve_common.py','onepve_gpu.py','onepve_driver_cache.py']:
+                    stream.add(root/'lib'/name,arcname='source/lib/'+name,recursive=False)
+                stream.add(runtime,arcname='cache',recursive=True)
+                for version,source in state['artifacts']['driver_sources'].items():
+                    stream.add(source,arcname='drivers/'+version+'.tar.gz',recursive=False)
+            output.flush();os.fsync(output.fileno())
+        pending=dict(owner=state['owner'],path=str(path),sha256=_digest(temporary),bytes=temporary.stat().st_size)
+        _save(state,bundle_pending=pending)
+        sync_directory()
+        try:os.link(temporary,path)
+        except FileExistsError:
+            need(not path.is_symlink() and path.is_file() and _digest(path)==pending['sha256'],
+                 'Bundle appeared with different content; retained for inspection')
+        sync_directory()
+        _save(state,bundle_sha256=pending['sha256'],bundle_bytes=pending['bytes'],bundle_pending=None)
+        sync_directory()
+    finally:
+        temporary.unlink(missing_ok=True)
     return path
 
 
@@ -650,12 +690,90 @@ def _job_log_progress(text):
     return detail,remaining
 
 
+def _job_execution(q,job):
+    source="""import json,subprocess
+from pathlib import Path
+job=JOB
+raw=subprocess.run(['systemctl','show',job['unit']+'.service','-p','LoadState,ActiveState,SubState,MainPID'],capture_output=True,text=True).stdout
+unit=dict(line.split('=',1) for line in raw.splitlines() if '=' in line)
+stopped=(unit.get('LoadState')=='not-found' or (unit.get('LoadState')=='loaded' and unit.get('MainPID')=='0' and (unit.get('ActiveState') in {'inactive','failed'} or unit.get('SubState')=='exited')))
+paths={job['script'],*[x for x in job['command'] if x.startswith(str(Path(job['script']).parent)+'/')]}
+processes=[]
+if stopped:
+ for p in Path('/proc').iterdir():
+  if not p.name.isdecimal():continue
+  try:
+   args=p.joinpath('cmdline').read_bytes().split(bytes([0]))
+   if any(x.encode() in args for x in paths):processes.append(int(p.name))
+  except (FileNotFoundError,ProcessLookupError):pass
+print(json.dumps({'stopped':stopped and not processes,'unit':unit,'processes':processes,'boot_id':Path('/proc/sys/kernel/random/boot_id').read_text().strip()}))
+""".replace('JOB',repr({key:job[key] for key in ['unit','script','command']}))
+    answer=q.execute(['/usr/bin/python3','-c',source],30)
+    need(answer['returncode']==0,'Could not inspect the original guest job')
+    evidence=json.loads(answer['stdout'])
+    need(isinstance(evidence,dict) and type(evidence.get('stopped')) is bool
+         and isinstance(evidence.get('boot_id'),str) and evidence['boot_id'],'Invalid guest job execution evidence')
+    return evidence
+
+
+def _observe_job(q,job,result):
+    if result.get('status') not in {'RUNNING','FAILED','INTERRUPTED'}:return result
+    evidence=_job_execution(q,job)
+    if not evidence['stopped']:
+        if result['status'] in {'FAILED','INTERRUPTED'}:
+            raise TimeoutError('Original guest job is still active; no duplicate was started: '+job['unit'])
+        return result
+    # The wrapper can publish its final result just before the unit stops.
+    current=json.loads(q.read(job['path']))
+    if current.get('status') in {'SUCCESS','FAILED','INTERRUPTED'}:return current
+    if current.get('status')=='RUNNING':
+        return dict(status='INTERRUPTED',log=str(Path(job['path']).with_suffix('.log')),
+                    previous_boot_id=current.get('boot_id'),observed_boot_id=evidence['boot_id'],
+                    observed_utc=datetime.now(timezone.utc).isoformat(),reason='Original unit and owned processes are no longer executing')
+    raise TimeoutError('Original guest job result is unavailable; inspect before retrying: '+job['unit'])
+
+
+def _record_job_result(state,job,result):
+    job['result']=result
+    for previous in state.get('job_history',[]):
+        if previous.get('unit')==job['unit']:previous['result']=dict(result)
+    _save(state)
+
+
+def _refresh_job(state,job):
+    try:
+        with Qga(state['vmid']) as q:
+            exists=q.execute(['/usr/bin/test','-f',job['path']],10)
+            need(exists['returncode'] in {0,1},'Could not inspect the original result path')
+            if exists['returncode']==0:
+                result=_observe_job(q,job,json.loads(q.read(job['path'])))
+            else:
+                evidence=_job_execution(q,job)
+                need(evidence['stopped'],'Original guest job may still be executing')
+                saved=job.get('result',{})
+                result=saved if saved.get('status') in {'FAILED','INTERRUPTED'} else dict(status='INTERRUPTED',log=str(Path(job['path']).with_suffix('.log')),
+                    observed_boot_id=evidence['boot_id'],observed_utc=datetime.now(timezone.utc).isoformat(),
+                    reason='Original unit and owned processes stopped without a result file')
+    except (OSError,RuntimeError,ValueError,KeyError) as error:
+        raise TimeoutError('Guest job outcome unavailable; no duplicate was started: '+job['unit']) from error
+    if result.get('status') in {'SUCCESS','FAILED','INTERRUPTED'}:_record_job_result(state,job,result)
+    return result
+
+
 def _job(state,name,command,timeout=7200,retry_failed=False):
     jobs=state.setdefault('jobs',{});job=jobs.get(name)
     if job and job.get('result',{}).get('status')=='SUCCESS':return job['result']
+    if job and retry_failed:
+        current=_refresh_job(state,job)
+        if current.get('status')=='SUCCESS':return current
+        if current.get('status')=='RUNNING':job.pop('result',None)
+    if job and job.get('result',{}).get('status')=='INTERRUPTED':
+        if not retry_failed:raise TimeoutError('Previous '+name+' job was interrupted; explicit resume is required: '+job['unit'])
+        job=None
     if job and job.get('result',{}).get('status')=='FAILED':
         need(retry_failed,'Previous '+name+' job failed; explicit resume is required')
         job=None
+    retained=job is not None
     if job is None:
         attempt=len([x for x in state.setdefault('job_history',[]) if x['name']==name])+1
         unit='onepve-'+name+'-'+state['owner'][:12]+'-'+str(attempt)
@@ -665,11 +783,16 @@ def _job(state,name,command,timeout=7200,retry_failed=False):
     stage='VM %s：%s' % (state['vmid'], PHASE_LABELS.get(state.get('phase'), '运行客机安装任务'))
     log_detail='客机日志：' + str(Path(job['path']).with_suffix('.log'))
     progress(stage,log_detail)
-    wrapper="""import subprocess,json,os
+    wrapper="""import subprocess,json,os,datetime
 from pathlib import Path
 p=Path(RESULT);p.parent.mkdir(parents=True,exist_ok=True,mode=0o700);os.umask(0o077)
+started={'boot_id':Path('/proc/sys/kernel/random/boot_id').read_text().strip(),'started_utc':datetime.datetime.now(datetime.timezone.utc).isoformat()}
 def write(value):
- t=p.with_suffix('.new');t.write_text(json.dumps(value));t.replace(p)
+ value={**started,**value}
+ if value['status']!='RUNNING':value['finished_utc']=datetime.datetime.now(datetime.timezone.utc).isoformat()
+ t=p.with_suffix('.new')
+ with t.open('w') as stream:json.dump(value,stream);stream.flush();os.fsync(stream.fileno())
+ t.replace(p)
 write({'status':'RUNNING'})
 with p.with_suffix('.log').open('ab',buffering=0) as log:
  try:
@@ -680,24 +803,35 @@ with p.with_suffix('.log').open('ab',buffering=0) as log:
 """.replace('RESULT',repr(job['path'])).replace('COMMAND',repr(job['command']))
     # The unit and result path are deterministic: resume observes rather than
     # launching a duplicate while a slow installation/build is still running.
-    with Qga(state['vmid']) as q:
-        observe=q.execute(['/bin/systemctl','show',job['unit']+'.service','-p','LoadState,ActiveState'],30)
-        absent='LoadState=not-found' in observe['stdout']
-        if absent:
-            exists=q.execute(['/usr/bin/test','-f',job['path']],10)
-            if exists['returncode']!=0:
-                # A previous CLI may have stopped after recording the intent.
-                q.write(job['script'],wrapper.encode())
-                launch=q.execute(['/usr/bin/systemd-run','--no-block','--unit='+job['unit'],'--property=Type=oneshot',
-                                  '--property=RemainAfterExit=yes','--property=TimeoutStartSec=infinity',
-                                  '/usr/bin/python3',job['script']],30)
-                need(launch['returncode']==0,'Could not launch persistent guest job')
+    try:
+        with Qga(state['vmid']) as q:
+            observe=q.execute(['/bin/systemctl','show',job['unit']+'.service','-p','LoadState,ActiveState'],30)
+            need('LoadState=' in observe['stdout'],'Could not observe the guest job unit')
+            absent='LoadState=not-found' in observe['stdout']
+            if absent:
+                exists=q.execute(['/usr/bin/test','-f',job['path']],10)
+                need(exists['returncode'] in {0,1},'Could not inspect the guest result path')
+                if exists['returncode']!=0:
+                    # A previous CLI may have stopped after recording the intent.
+                    if retained:need(_job_execution(q,job)['stopped'],'Original guest job may still be executing')
+                    q.write(job['script'],wrapper.encode())
+                    launch=q.execute(['/usr/bin/systemd-run','--no-block','--unit='+job['unit'],'--property=Type=oneshot',
+                                      '--property=RemainAfterExit=yes','--property=TimeoutStartSec=infinity',
+                                      '/usr/bin/python3',job['script']],30)
+                    need(launch['returncode']==0,'Could not launch persistent guest job')
+                    absent=False
+    except (OSError,RuntimeError,ValueError) as error:
+        raise TimeoutError('Guest job launch/observation is uncertain; resume will observe '+job['unit']) from error
     deadline=time.monotonic()+timeout
-    next_progress=0;last_log_size=None
+    next_progress=0;last_log_size=None;next_observe=0 if absent else time.monotonic()+10
     while time.monotonic()<deadline:
         try:
             with Qga(state['vmid']) as q:
                 result=json.loads(q.read(job['path']))
+                now=time.monotonic()
+                if result.get('status')=='RUNNING' and now<deadline and now>=next_observe:
+                    next_observe=now+10
+                    result=_observe_job(q,job,result)
                 if result.get('status')=='RUNNING' and progress_enabled() and time.monotonic()>=next_progress:
                     next_progress=time.monotonic()+10
                     try:
@@ -714,8 +848,10 @@ with p.with_suffix('.log').open('ab',buffering=0) as log:
                     except (OSError,RuntimeError,ValueError,TypeError,KeyError):
                         progress(stage,'进度采样暂不可用 | '+log_detail)
         except (OSError,RuntimeError,json.JSONDecodeError):result={}
-        if result.get('status') in {'SUCCESS','FAILED'}:
-            job['result']=result;_save(state)
+        if result.get('status') in {'SUCCESS','FAILED','INTERRUPTED'}:
+            _record_job_result(state,job,result)
+            if result['status']=='INTERRUPTED':
+                raise TimeoutError(name+' interrupted; explicit resume can start a new attempt; inspect guest '+result['log'])
             need(result['status']=='SUCCESS',name+' failed; inspect guest '+result.get('log',job['path']))
             return result
         time.sleep(2)
@@ -805,13 +941,15 @@ print(json.dumps({'status':'GUEST_DRIVER_READY','kernel':kernel,'version':spec['
 
 def _prepare_driver(state,retry=False):
     job=state.get('jobs',{}).get('driver')
+    if job and retry and job.get('result',{}).get('status')!='SUCCESS':
+        _refresh_job(state,job)
     if job and job.get('result',{}).get('status')=='SUCCESS' and state.get('driver_spec'):
         current=_guest(state,['/bin/uname','-r'],30)['stdout'].strip()
         if current!=state['driver_spec']['kernel']:
             state['jobs'].pop('driver');job=None
             _save(state,driver_cache=dict(status='UNAVAILABLE',reason='Guest kernel changed; prepare a new driver job'))
     # Existing persistent jobs own their script/cache inputs until they finish.
-    stage_new=not job or (retry and job.get('result',{}).get('status')=='FAILED')
+    stage_new=not job or (retry and job.get('result',{}).get('status') in {'FAILED','INTERRUPTED'})
     stage=state['guest_stage'];path=stage+'/prepare-driver.py'
     root=artifacts.CACHE_ROOT/'driver-binaries'
     if stage_new:
@@ -852,9 +990,49 @@ def _prepare_driver(state,retry=False):
     _save(state,'GUEST_DRIVER_READY')
 
 
+def _audit_ready(state,enabled,seconds=15):
+    audit.configure(state,enabled)
+    if not enabled:return
+    deadline=time.monotonic()+seconds
+    while True:
+        observed=audit.status(state)
+        if observed.get('enabled') and observed.get('active') and not observed.get('coverage_gap'):return
+        need(time.monotonic()<deadline,'Optional audit is not observing yet; NIC remains disconnected; inspect network-status and reapply/resume')
+        time.sleep(.5)
+
+
+def _network_ready(state):
+    current=_owned(state);cfg=state['config']
+    need(not any(re.fullmatch(r'net[1-9]\d*',key) for key in current),'Isolation refuses additional unguarded NICs')
+    match=re.match(r'(?:virtio=)?((?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2})(?:,|$)',current['net0'])
+    need(match,'Cannot identify the actual VirtIO MAC')
+    need(not cfg['mac'] or cfg['mac']==match[1].upper(),'Requested VM MAC changed; NIC remains disconnected')
+    cfg['mac']=match[1].upper()
+    network.validate_vm_nic(state,current)
+    if 'link_down=1' not in current['net0'].split(','):
+        disconnected=re.sub(r',link_down=[01](?=,|$)','',current['net0'])+',link_down=1'
+        run(['qm','set',str(state['vmid']),'--net0',disconnected],timeout=None)
+    if 'network' not in state:state['network']=network.preflight(cfg,status()['vms'])
+    _save(state)
+    state['network']['installed']=network.install(state);_save(state)
+    hook=_snippet(state,'network-hook.py',_network_hook(state),True)
+    need(not current.get('hookscript') or current['hookscript']==hook,'Foreign pre-start hook retained; NIC remains disconnected')
+    run(['qm','set',str(state['vmid']),'--hookscript',hook],timeout=None)
+    if cfg['connection_audit']:_audit_ready(state,True)
+    ready=network.status(state)
+    need(ready['table_present'] and ready.get('rules_match'),'Host network guard readback differs; NIC remains disconnected')
+    net=re.sub(r',link_down=[01](?=,|$)','',current['net0'])
+    run(['qm','set',str(state['vmid']),'--net0',net+',link_down=0'],timeout=None)
+
+
+def _network_hook(state):
+    return ("#!/usr/bin/python3\nimport sys\nassert len(sys.argv)==3 and sys.argv[1]=="+repr(str(state['vmid']))
+            +"\nif sys.argv[2]!='pre-start':raise SystemExit(0)\n"+network.hook(state))
+
+
 def _gpu_hook(state):
     device=state['selected_gpu'];vmid=str(state['vmid'])
-    return """#!/usr/bin/python3
+    content="""#!/usr/bin/python3
 import sys,json,re
 from pathlib import Path
 if len(sys.argv)!=3:raise SystemExit('Expected virtual-machine ID and hook phase')
@@ -870,6 +1048,7 @@ assert (p/'driver').resolve(strict=True).name=='vfio-pci'
 assert sorted(x.name for x in (p/'iommu_group/devices').iterdir())==[BDF]
 if (p/'physfn').exists():assert (p/'physfn/driver').resolve(strict=True).name=='i915'
 """.replace('VMID',repr(vmid)).replace('OWNER',repr(state['owner'])).replace('BDF',repr(device['bdf'])).replace('VENDOR',repr(device['vendor'])).replace('DEVICE',repr(device['device']))
+    return content+(network.hook(state) if network.managed(state['config']) else '')
 
 
 def _fallback(state,error):
@@ -889,12 +1068,18 @@ def _detach_gpu(state):
         actual=config.get('hostpci0','').split(',',1)[0].removeprefix('host=')
         need(not actual or actual==state['owned_gpu_bdf'],'GPU assignment was edited outside onePVE; fallback stopped')
         hook=state.get('snippets',{}).get('gpu-hook.py',{}).get('volume')
-        need(not config.get('hookscript') or config['hookscript']==hook,'GPU prestart hook was edited outside onePVE; fallback stopped')
+        network_hook=state.get('snippets',{}).get('network-hook.py',{}).get('volume') if network.managed(state['config']) else None
+        need(not config.get('hookscript') or config['hookscript'] in {hook,network_hook},'GPU prestart hook was edited outside onePVE; fallback stopped')
+        _stop(state['vmid'])
         if actual:
-            _stop(state['vmid'])
             fields='hostpci0'+(',hookscript' if config.get('hookscript')==hook else '')
             run(['qm','set',str(state['vmid']),'--delete',fields],timeout=None)
-            run(['qm','start',str(state['vmid'])],timeout=None);_wait_cloud(state,300)
+        elif config.get('hookscript')==hook:
+            run(['qm','set',str(state['vmid']),'--delete','hookscript'],timeout=None)
+        if network.managed(state['config']):
+            network_hook=_snippet(state,'network-hook.py',_network_hook(state),True)
+            run(['qm','set',str(state['vmid']),'--hookscript',network_hook],timeout=None)
+        run(['qm','start',str(state['vmid'])],timeout=None);_wait_cloud(state,300)
 
 
 def _archive_gpu_error(state):
@@ -910,6 +1095,8 @@ def _continue(state,retry=False):
     need(state.get('operation') in {'create','rebuild','remove'},'Operation kind is missing/unknown; inspect state before any recovery action')
     if state.get('operation')=='remove':return _resume_remove(state)
     cfg=state['config']
+    if state['phase']=='DELETED' and state.get('previous_network'):
+        _remove_network(state['previous_network']);_save(state,previous_network=None)
     if state['phase']=='DELETING':
         need(not _exists(state['vmid']),'Deletion outcome requires inspection; resume never repeats deletion')
         _save(state,'DELETED')
@@ -962,7 +1149,10 @@ def _continue(state,retry=False):
                 _save(state,'GPU_VERIFYING')
             if state['phase']=='GPU_VERIFYING':
                 _runtime_verify(state,True);_connection(state);_archive_gpu_error(state);_save(state,'READY_GPU',mode='wayland')
-        except (RuntimeError,TimeoutError,OSError,subprocess.SubprocessError) as error:
+        except (TimeoutError,OSError,GuestAgentError,subprocess.TimeoutExpired):
+            # An observer timeout or transport failure does not prove a failed build.
+            raise
+        except (RuntimeError,subprocess.SubprocessError) as error:
             _fallback(state,error)
     return state
 
@@ -984,13 +1174,16 @@ def create(config,dry_run=False):
                   (config['vmid'],previous['phase'],previous['path']),file=sys.stderr,flush=True)
             print('删除旧部署记录并继续创建？镜像和驱动缓存保留。[y/N]：',end='',file=sys.stderr,flush=True)
             need(sys.stdin.readline().strip() in {'y','Y'},'已取消：旧部署记录已保留，未继续创建')
-        resources=_resources(config);selected=_select_gpu(config);prepared=prepare();_validate_artifacts(prepared)
+        resources=_resources(config);selected=_select_gpu(config);netplan=network.preflight(config,status()['vms'])
+        prepared=prepare();_validate_artifacts(prepared)
         if previous:
             _require_missing_vmid(config['vmid'])
             need(_previous_record(config['vmid'])==previous,'Previous operation record changed; cleanup and creation stopped')
         else:
             need(not os.path.lexists(_state_path(config['vmid'])),'A previous operation appeared; creation stopped')
         state=_new_state(config,prepared,resources,selected)
+        state['network']=netplan
+        if previous:_remove_network(json.loads(_state_path(config['vmid']).read_text()))
         if previous:state['previous_record_cleared']={key:previous[key] for key in ['owner','phase']}
         # Replace only the confirmed state atomically, keeping the lock inode and caches.
         _save(state)
@@ -1005,13 +1198,16 @@ def rebuild(config,confirm_vmid,dry_run=False):
         result=plan(config,True);result['delete_guard']=_deletion_check(config['vmid']);return result
     with _lock(config['vmid']):
         resources=_resources(config);selected=_select_gpu(config);guard=_deletion_check(config['vmid'])
+        netplan=network.preflight(config,status()['vms'])
         prepared=prepare();_validate_artifacts(prepared)
         old=_state_path(config['vmid']);previous=None
         if old.exists():
             previous=json.loads(old.read_text());need(previous.get('phase') in FINISHED|{'REMOVED'},'Existing operation is unfinished; inspect/resume rather than replacing its evidence')
             archived=old.with_name('state.previous-'+previous['owner']+'.json');need(not archived.exists(),'Previous operation archive already exists');old.rename(archived)
         state=_new_state(config,prepared,resources,selected,operation='rebuild');state['delete_guard']=guard
-        if previous:state['previous_snippets']=previous.get('snippets',{})
+        state['network']=netplan
+        if previous:
+            state['previous_snippets']=previous.get('snippets',{});state['previous_network']=previous
         _save(state)
         _bundle(state);_delete(state)
         return _continue(state)
@@ -1026,6 +1222,7 @@ def resume(vmid,gpu_selection=None):
         _validate_artifacts(state['artifacts'])
         if gpu_selection is not None:
             need(state['phase'] in FINISHED|{'BASE_READY'},'GPU selection can change only at a verified stable checkpoint')
+            state['config'].setdefault('network_policy','legacy')
             state['config']['gpu']=gpu_selection;state['config']=normalize(state['config']);state['selected_gpu']=_select_gpu(state['config'])
             if not state['selected_gpu']:
                 _detach_gpu(state);_wait_desktop(state);_guest(state,['/opt/onepve-agent/bin/agent-set-mode','x11'],180);_runtime_verify(state,False)
@@ -1045,7 +1242,7 @@ def _remove_snippets(state):
 def _resume_remove(state):
     need(state['phase'] in {'REMOVE_REQUESTED','DELETING','DELETED','REMOVED'},'Unrecognized removal checkpoint')
     need(not _exists(state['vmid']),'Removal outcome requires inspection: resume never deletes or recreates a VM')
-    _remove_snippets(state);_save(state,'REMOVED');return state
+    _remove_network(state);_remove_snippets(state);_save(state,'REMOVED');return state
 
 
 def remove(vmid,confirm_vmid,dry_run=False):
@@ -1060,8 +1257,50 @@ def remove(vmid,confirm_vmid,dry_run=False):
             elif state.get('managed_vm'):_owned(state)
             else:need(state.get('delete_guard',{}).get('config_sha256')==guard['config_sha256'],'Unmanaged removal target changed; inspect before any new operation')
         else:state=dict(schema_version=1,owner=uuid.uuid4().hex,vmid=vmid,phase='REMOVE_REQUESTED',snippets={})
-        state['operation']='remove';state['delete_guard']=guard;_save(state,'REMOVE_REQUESTED');_delete(state);_remove_snippets(state);_save(state,'REMOVED')
+        state['operation']='remove';state['delete_guard']=guard;_save(state,'REMOVE_REQUESTED');_delete(state);_remove_network(state);_remove_snippets(state);_save(state,'REMOVED')
         return state
+
+
+def _remove_network(state):
+    if network.managed(state.get('config',{})):
+        audit.remove(state)
+        network.remove(state)
+
+
+def configure_network(vmid,changes,dry_run=False):
+    require_root()
+    with _lock(vmid,dry_run=dry_run):
+        state=json.loads(_state_path(vmid).read_text());current=_owned(state)
+        need(network.managed(state.get('config',{})) and state.get('network',{}).get('installed'),
+             'Legacy VM network is unchanged; use a newly created managed workstation for network policy switching')
+        network.validate_vm_nic(state,current)
+        allowed={'network_policy','connection_audit','management_cidrs','lan_allow','protected_cidrs'}
+        need(set(changes)<=allowed,'Unexpected network setting')
+        candidate=dict(state['config']);candidate.update(changes);candidate=normalize(candidate)
+        netplan=network.preflight(candidate,status()['vms'])
+        need(current.get('hookscript') in {item['volume'] for key,item in state.get('snippets',{}).items() if key in {'gpu-hook.py','network-hook.py'}},
+             'Network pre-start hook changed externally; no policy changes were applied')
+        if dry_run:return dict(status='PLAN_ONLY',vmid=vmid,config=candidate,network=netplan,ssh_disconnect=True)
+        net=re.sub(r',link_down=[01](?=,|$)','',current['net0'])
+        _save(state,network_pending=dict(config=candidate,network=netplan))
+        run(['qm','set',str(vmid),'--net0',net+',link_down=1'],timeout=None)
+        # On failure keep the NIC down and the pending intent: never recover by allowing traffic.
+        updated=dict(state,config=candidate,network=netplan)
+        installed=network.install(updated);updated['network']['installed']=installed
+        if candidate['connection_audit'] or state['config'].get('connection_audit'):
+            _audit_ready(updated,candidate['connection_audit'])
+        state['config']=candidate;state['network']=updated['network'];_save(state)
+        proof=network.status(state)
+        need(proof['table_present'] and proof.get('rules_match'),'Network guard readback differs; NIC remains disconnected')
+        run(['qm','set',str(vmid),'--net0',net+',link_down=0'],timeout=None)
+        _save(state,network_pending=None)
+        return dict(status='NETWORK_CONFIGURED',vmid=vmid,config=candidate,network=network.status(state),audit=audit.status(state))
+
+
+def network_status(vmid):
+    require_root();state=status(vmid);current=_owned(state)
+    if network.managed(state.get('config',{})):network.validate_vm_nic(state,current)
+    return dict(status='NETWORK_STATUS',vmid=vmid,network=network.status(state),audit=audit.status(state))
 
 
 def status(vmid=None):
@@ -1072,6 +1311,121 @@ def status(vmid=None):
     if state['vm_exists']:
         config=vm_config(vmid);state['ownership_matches']=state['owner'] in config.get('description','') and 'onepve-agent' in config.get('tags','').split(';')
     return state
+
+
+def _diagnostic_state(vmid):
+    path=_state_path(vmid)
+    need(path.is_file() and not path.is_symlink(),'No regular onePVE Agent record exists for this VMID')
+    state=json.loads(path.read_text())
+    need(isinstance(state,dict) and state.get('vmid')==vmid,'State VMID differs')
+    return state
+
+
+def doctor(vmid):
+    """Inspect recorded/runtime state without changing the VM or browser."""
+    require_root();state=_diagnostic_state(vmid)
+    checks={};report=dict(vmid=vmid,phase=state.get('phase'),mode=state.get('mode'),checks=checks,
+                         read_only=True,ui_input_issued=False)
+    checks['recorded_verification']=dict(status='RECORDED',updated_utc=state.get('updated_utc'),
+        results={name:{'runtime':data.get('runtime',{}).get('status'),'mcp':data.get('mcp',{}).get('status')}
+                 for name,data in state.get('verification',{}).items()},gpu_error=str(state.get('gpu_error',''))[-500:])
+    try:
+        current=_owned(state);checks['ownership']={'status':'OK'}
+    except (OSError,RuntimeError,ValueError,subprocess.SubprocessError) as error:
+        checks['ownership']=dict(status='UNKNOWN',error=str(error)[-500:])
+        report['status']='UNKNOWN';return report
+    source="""import json,os,pwd,subprocess
+from pathlib import Path
+checks={}
+def sample(name,action):
+ try:checks[name]=action()
+ except Exception as error:checks[name]={'status':'UNKNOWN','error':str(error)[-500:]}
+account=pwd.getpwnam('agent');home=Path(account.pw_dir);runtime='/run/user/'+str(account.pw_uid)
+environment=dict(HOME=str(home),USER=account.pw_name,LOGNAME=account.pw_name,PATH='/usr/local/bin:/usr/bin:/bin',XDG_RUNTIME_DIR=runtime,DBUS_SESSION_BUS_ADDRESS='unix:path='+runtime+'/bus')
+marker=home/'.local/state/onepve-agent/manual.lock';manual=os.path.lexists(marker)
+sample('manual_mode',lambda:dict(status='OK',active=manual))
+def services():
+ mode=json.loads(Path('/etc/onepve-agent/mode.json').read_text())['mode']
+ parts=['fixture','keyring','chromium','vnc','novnc','controls','mcp']+(['wayland'] if mode=='wayland' else [])
+ names=['onepve-agent-'+part+'.service' for part in parts]
+ result=subprocess.run(['/usr/sbin/runuser','-u',account.pw_name,'--','/bin/systemctl','--user','show',*names,'-p','Id,LoadState,ActiveState,SubState,MainPID'],env=environment,capture_output=True,text=True,timeout=8)
+ rows={}
+ for block in result.stdout.strip().split('\\n\\n'):
+  entry=dict(line.split('=',1) for line in block.splitlines() if '=' in line)
+  if entry.get('Id'):rows[entry['Id']]=entry
+ if set(rows)!=set(names):raise RuntimeError(result.stderr[-400:] or 'Incomplete service observations')
+ unexpected=[]
+ for name,row in rows.items():
+  stopped=manual and name=='onepve-agent-mcp.service'
+  good=row.get('LoadState')=='loaded' and ((row.get('ActiveState') not in {'active','activating'} and row.get('MainPID')=='0') if stopped else (row.get('ActiveState')=='active' and (row.get('MainPID') not in {None,'0'} or name=='onepve-agent-keyring.service' and row.get('SubState')=='exited')))
+  if not good:unexpected.append(name)
+ return dict(status='WARN' if unexpected else 'OK',mode=mode,units=rows,unexpected=unexpected)
+sample('services',services)
+def listeners():
+ result=subprocess.run(['/usr/bin/ss','-H','-ltn'],capture_output=True,text=True,timeout=5,check=True)
+ found={};exposed=[]
+ for line in result.stdout.splitlines():
+  fields=line.split()
+  if len(fields)<4 or ':' not in fields[3]:continue
+  host,port=fields[3].rsplit(':',1)
+  if port not in {'3000','5900','6080','8931','9222'}:continue
+  found.setdefault(port,[]).append(host)
+  if host not in {'127.0.0.1','[::1]','::1'}:exposed.append(fields[3])
+ expected={'3000','5900','6080','9222'}|(set() if manual else {'8931'})
+ missing=sorted(expected-found.keys());unexpected=manual and '8931' in found
+ return dict(status='WARN' if exposed or missing or unexpected else 'OK',ports=found,non_loopback=exposed,missing=missing,manual_mcp_listening=bool(unexpected))
+sample('listeners',listeners)
+def diagnostics():
+ output={}
+ for name,path in [('mode',Path('/etc/onepve-agent/mode.json')),('wayland',home/'.local/state/onepve-agent/wayland-state.json'),('mcp',home/'.local/state/onepve-agent/mcp-acceptance.json')]:
+  if not path.exists():output[name]={'status':'NOT_RECORDED'};continue
+  with path.open('rb') as stream:raw=stream.read(16385)
+  if len(raw)>16384:raise RuntimeError('Existing diagnostic exceeds read limit: '+name)
+  data=json.loads(raw)
+  output[name]={key:data[key] for key in ['status','mode','finishedAt','finished_utc','sway_renderer','guest_vf_bdf'] if key in data}
+ return dict(status='OK',reports=output)
+sample('diagnostics',diagnostics)
+print(json.dumps(checks))
+"""
+    try:
+        with Qga(vmid) as q:answer=q.execute(['/usr/bin/python3','-c',source],30)
+        need(answer['returncode']==0,'Guest diagnostics unavailable: '+answer['stderr'][-300:])
+        observed=json.loads(answer['stdout'])
+        need(isinstance(observed,dict),'Invalid guest diagnostics')
+        for name in ['services','listeners','manual_mode','diagnostics']:
+            value=observed.get(name)
+            checks[name]=value if isinstance(value,dict) and value.get('status') in {'OK','WARN','UNKNOWN'} else dict(status='UNKNOWN',error='Missing/invalid observation')
+    except (OSError,RuntimeError,ValueError,KeyError,subprocess.SubprocessError) as error:
+        for name in ['services','listeners','manual_mode','diagnostics']:checks[name]=dict(status='UNKNOWN',error=str(error)[-500:])
+    if network.managed(state.get('config',{})):
+        try:
+            network.validate_vm_nic(state,current)
+            proof=network.status(state);observations=audit.status(state)
+            checks['network']=dict(status='OK' if proof.get('rules_match') and proof.get('boot_unit_present') and proof.get('config_present') else 'WARN',**proof)
+            checks['connection_audit']=dict(status='WARN' if observations.get('coverage_gap') else 'OK',**observations)
+            report.update(network=proof,audit=observations)
+        except (RuntimeError,OSError,ValueError,subprocess.SubprocessError) as error:
+            checks['network']=dict(status='UNKNOWN',error=str(error)[-500:])
+    states={value['status'] for name,value in checks.items() if name!='recorded_verification'}
+    report['status']='ATTENTION' if 'WARN' in states else ('UNKNOWN' if 'UNKNOWN' in states else 'OK')
+    return report
+
+
+def logs(vmid,job='install'):
+    """Return only the bounded tail of an existing owned guest job log."""
+    require_root();need(job in {'install','driver','verify'},'Unknown job log')
+    state=_diagnostic_state(vmid);record=state.get('jobs',{}).get(job)
+    report=dict(vmid=vmid,job=job,read_only=True)
+    if not record:return dict(report,status='NOT_RECORDED',message='No recorded '+job+' job log')
+    report['path']=str(Path(record['path']).with_suffix('.log'))
+    try:
+        _owned(state)
+        with Qga(vmid) as q:
+            q.socket.settimeout(5);size,tail=_job_log_tail(q,record)
+        report.update(status='OK',bytes=size,tail_bytes=len(tail),truncated=size>len(tail),tail=tail.decode('utf-8',errors='replace'))
+    except (OSError,RuntimeError,ValueError,KeyError,subprocess.SubprocessError) as error:
+        report.update(status='UNKNOWN',error=str(error)[-500:])
+    return report
 
 
 def verify(vmid):
@@ -1096,12 +1450,29 @@ def main(argv=None):
         child.add_argument('--gpu',default='auto');child.add_argument('--mac');child.add_argument('--expected-ip');child.add_argument('--viewer-port',type=int,default=16080)
         child.add_argument('--address',help='Optional static IPv4 CIDR; default is DHCP')
         child.add_argument('--gateway',help='IPv4 gateway for --address');child.add_argument('--nameserver',help='One IPv4 DNS server')
+        child.add_argument('--network-policy',choices=['isolated','lan'],default='isolated')
+        child.add_argument('--management-cidr',dest='management_cidrs',action='append',default=[])
+        child.add_argument('--lan-allow',action='append',default=[],help='IPv4/CIDR,tcp|udp,port')
+        child.add_argument('--protected-cidr',dest='protected_cidrs',action='append',default=[])
+        child.add_argument('--connection-audit',action='store_true',help='Optional 72-hour host conntrack metadata')
+        child.add_argument('--dhcp-server');child.add_argument('--isolation-gateway');child.add_argument('--vlan',type=int)
         child.add_argument('--dry-run',action='store_true')
         if action=='rebuild':child.add_argument('--confirm-vmid',type=int,required=True)
     commands.add_parser('status').add_argument('--vmid',type=int)
     commands.add_parser('verify').add_argument('--vmid',type=int,required=True)
+    commands.add_parser('doctor').add_argument('--vmid',type=int,required=True)
+    command=commands.add_parser('logs');command.add_argument('--vmid',type=int,required=True);command.add_argument('--job',choices=['install','driver','verify'],default='install')
     command=commands.add_parser('resume');command.add_argument('--vmid',type=int,required=True);command.add_argument('--gpu')
     command=commands.add_parser('remove');command.add_argument('--vmid',type=int,required=True);command.add_argument('--confirm-vmid',type=int,required=True);command.add_argument('--dry-run',action='store_true')
+    commands.add_parser('network-status').add_argument('--vmid',type=int,required=True)
+    command=commands.add_parser('network');command.add_argument('--vmid',type=int,required=True)
+    command.add_argument('--network-policy',choices=['isolated','lan'])
+    command.add_argument('--audit',choices=['on','off'])
+    command.add_argument('--management-cidr',dest='management_cidrs',action='append')
+    command.add_argument('--lan-allow',action='append');command.add_argument('--clear-lan-allow',action='store_true')
+    command.add_argument('--protected-cidr',dest='protected_cidrs',action='append');command.add_argument('--dry-run',action='store_true')
+    command=commands.add_parser('audit-export');command.add_argument('--vmid',type=int,required=True)
+    command.add_argument('--output',type=Path,required=True);command.add_argument('--format',choices=['csv','json'],default='csv');command.add_argument('--limit',type=int,default=10000)
     args=parser.parse_args(argv)
     if args.action in {'plan','create','rebuild'}:
         config={k:v for k,v in vars(args).items() if k not in {'action','ssh_key_file','dry_run','confirm_vmid'}}
@@ -1112,6 +1483,18 @@ def main(argv=None):
     elif args.action=='prepare':result=prepare()
     elif args.action=='status':result=status(args.vmid)
     elif args.action=='verify':result=verify(args.vmid)
+    elif args.action=='doctor':result=doctor(args.vmid)
+    elif args.action=='logs':result=logs(args.vmid,args.job)
+    elif args.action=='network-status':result=network_status(args.vmid)
+    elif args.action=='network':
+        changes={key:getattr(args,key) for key in ['network_policy','management_cidrs','lan_allow','protected_cidrs'] if getattr(args,key) is not None}
+        if args.clear_lan_allow:
+            need(args.lan_allow is None,'Choose --clear-lan-allow or --lan-allow');changes['lan_allow']=[]
+        if args.audit is not None:changes['connection_audit']=args.audit=='on'
+        need(changes,'Choose a network setting to change')
+        result=configure_network(args.vmid,changes,args.dry_run)
+    elif args.action=='audit-export':
+        require_root();state=status(args.vmid);_owned(state);result=audit.export(state,args.output,args.format,args.limit)
     elif args.action=='resume':result=resume(args.vmid,args.gpu)
     else:result=remove(args.vmid,args.confirm_vmid,args.dry_run)
     print(json.dumps(result,ensure_ascii=False,indent=2));return 0

@@ -1,4 +1,5 @@
 import importlib
+import contextlib
 import io
 import hashlib
 import json
@@ -204,7 +205,7 @@ class ArtifactTests(unittest.TestCase):
         path = artifacts.CACHE_ROOT / 'downloads/fnm.zip'
         with mock.patch.object(artifacts, '_open_url', return_value=io.BytesIO(b'fixed vendor asset')):
             artifacts._fnm_download(path)
-        record = json.loads((artifacts.CACHE_ROOT / 'fnm-download.json').read_text())
+        record = json.loads((artifacts.CACHE_ROOT / ('fnm-download-' + artifacts.FNM_VERSION + '.json')).read_text())
         self.assertEqual(record['url'], artifacts.FNM_URL)
         self.assertEqual(record['sha256'], hashlib.sha256(path.read_bytes()).hexdigest())
         path.write_bytes(b'tampered')
@@ -286,7 +287,8 @@ class ArtifactTests(unittest.TestCase):
         self.assertEqual(result['image']['path'], result['image_path'])
         self.assertTrue(Path(result['driver_sources']['2025.12.10.2']).is_file())
 
-    def test_full_runtime_cache_build_uses_only_cached_node_and_no_scripts(self):
+    @contextlib.contextmanager
+    def runtime_fixture(self):
         artifacts._private_dir(artifacts.CACHE_ROOT)
         node_archive = self.node_tar([(artifacts.NODE_NAME + '/bin/node', b'node fixture', 'file'),
                                      (artifacts.NODE_NAME + '/lib/node_modules/npm/bin/npm-cli.js', b'npm fixture', 'file')])
@@ -304,7 +306,7 @@ class ArtifactTests(unittest.TestCase):
             self.assertEqual(environment['NPM_CONFIG_USERCONFIG'], os.devnull)
             self.assertNotEqual(environment['NPM_CONFIG_GLOBALCONFIG'], os.devnull)
             self.assertTrue(Path(environment['HOME']).is_relative_to(artifacts.CACHE_ROOT))
-            self.assertTrue(Path(argv[0]).is_relative_to(artifacts.CACHE_ROOT / 'tool-node'))
+            self.assertEqual(Path(argv[0]).relative_to(artifacts.CACHE_ROOT).parts[0][:10], 'tool-node-')
             prefix = Path(argv[argv.index('--prefix') + 1]); prefix.mkdir()
             (prefix / 'package.json').write_text(json.dumps({'dependencies': {'@playwright/mcp': artifacts.MCP_VERSION,
                                                                           '@openai/codex': artifacts.CODEX_VERSION}}))
@@ -316,6 +318,10 @@ class ArtifactTests(unittest.TestCase):
              mock.patch.object(artifacts, '_open_url', side_effect=open_url), \
              mock.patch.object(artifacts, 'run', side_effect=npm_install) as npm, \
              mock.patch.dict(os.environ, {'NODE_OPTIONS': '--require untrusted.js', 'npm_config_registry': 'https://invalid.test'}):
+            yield npm
+
+    def test_full_runtime_cache_build_uses_only_cached_node_and_no_scripts(self):
+        with self.runtime_fixture() as npm:
             result = artifacts._runtime_cache()
         self.assertEqual(npm.call_count, 1)
         record = json.loads((result / 'runtime-manifest.json').read_text())
@@ -326,6 +332,80 @@ class ArtifactTests(unittest.TestCase):
             self.assertEqual(artifacts._runtime_cache(), result)
             (result / 'npm/node_modules/@playwright/mcp/cli.js').write_text('tampered')
             with self.assertRaises(RuntimeError): artifacts._runtime_cache()
+
+    def test_runtime_pin_upgrade_preserves_legacy_and_other_versions(self):
+        with self.runtime_fixture():
+            first = artifacts._runtime_cache()
+            legacy = artifacts.CACHE_ROOT / 'runtime-cache'
+            first.rename(legacy)
+            original = (legacy / 'runtime-manifest.json').read_bytes()
+            self.assertEqual(artifacts._runtime_cache(), legacy)
+            created = []
+            for field, value in [('mcp_version', '0.0.84'), ('codex_version', '0.166.1'), ('fnm_version', 'v1.40.0')]:
+                versions = dict(artifacts.VERSIONS, **{field: value})
+                fnm_url = 'https://example.test/' + value if field == 'fnm_version' else artifacts.FNM_URL
+                with mock.patch.object(artifacts, field.upper(), value), \
+                     mock.patch.object(artifacts, 'VERSIONS', versions), \
+                     mock.patch.object(artifacts, 'FNM_URL', fnm_url):
+                    path = artifacts._runtime_cache()
+                    self.assertNotEqual(path, legacy)
+                    self.assertEqual(json.loads((path / 'runtime-manifest.json').read_text())[field], value)
+                    self.assertEqual(artifacts._runtime_cache(), path)
+                    created.append(path)
+            node_version = '26.14.0'
+            with mock.patch.object(artifacts, 'NODE_VERSION', node_version), \
+                 mock.patch.object(artifacts, 'NODE_NAME', 'node-v' + node_version + '-linux-x64'), \
+                 mock.patch.object(artifacts, 'NODE_ROOT', 'https://example.test/node-v' + node_version + '/'), \
+                 mock.patch.object(artifacts, 'VERSIONS', dict(artifacts.VERSIONS, node_version=node_version)), \
+                 self.runtime_fixture():
+                path = artifacts._runtime_cache()
+                self.assertEqual(json.loads((path / 'runtime-manifest.json').read_text())['node_version'], node_version)
+                created.append(path)
+            self.assertEqual(len(set(created)), 4)
+            self.assertEqual((legacy / 'runtime-manifest.json').read_bytes(), original)
+            self.assertEqual(artifacts._runtime_cache(), legacy)
+
+    def test_node_archive_upgrade_keeps_matching_legacy_tool_and_rejects_tampering(self):
+        artifacts._private_dir(artifacts.CACHE_ROOT)
+        entries = [(artifacts.NODE_NAME + '/bin/node', b'old node', 'file'),
+                   (artifacts.NODE_NAME + '/lib/node_modules/npm/bin/npm-cli.js', b'npm', 'file')]
+        archive = self.node_tar(entries)
+        digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+        old_node, old_npm = artifacts._tool_node(archive, digest)
+        legacy = artifacts.CACHE_ROOT / 'tool-node'
+        old_node.parents[2].rename(legacy)
+        old_node, old_npm = artifacts._tool_node(archive, digest)
+        self.assertTrue(old_node.is_relative_to(legacy))
+        entries[0] = (artifacts.NODE_NAME + '/bin/node', b'new node', 'file')
+        archive = self.node_tar(entries)
+        new_digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+        new_node, _ = artifacts._tool_node(archive, new_digest)
+        self.assertFalse(new_node.is_relative_to(legacy))
+        self.assertEqual(old_node.read_bytes(), b'old node')
+        new_node.write_bytes(b'tampered')
+        with self.assertRaisesRegex(RuntimeError, 'Artifact cache changed'):
+            artifacts._tool_node(archive, new_digest)
+
+    def test_fnm_version_upgrade_preserves_matching_legacy_record(self):
+        artifacts._private_dir(artifacts.CACHE_ROOT)
+        first = artifacts.CACHE_ROOT / 'downloads/first-fnm.zip'
+        with mock.patch.object(artifacts, '_open_url', return_value=io.BytesIO(b'old release')):
+            artifacts._fnm_download(first)
+        versioned_record = artifacts.CACHE_ROOT / ('fnm-download-' + artifacts.FNM_VERSION + '.json')
+        legacy = artifacts.CACHE_ROOT / 'fnm-download.json'
+        versioned_record.rename(legacy)
+        original = legacy.read_bytes()
+        with mock.patch.object(artifacts, '_open_url', side_effect=AssertionError('unexpected network')):
+            artifacts._fnm_download(first)
+        second = first.with_name('new-fnm.zip')
+        with mock.patch.object(artifacts, 'FNM_VERSION', 'v1.40.0'), \
+             mock.patch.object(artifacts, 'FNM_URL', 'https://example.test/v1.40.0/fnm.zip'), \
+             mock.patch.object(artifacts, '_open_url', return_value=io.BytesIO(b'new release')):
+            artifacts._fnm_download(second)
+        self.assertEqual(first.read_bytes(), b'old release')
+        self.assertEqual(second.read_bytes(), b'new release')
+        self.assertEqual(legacy.read_bytes(), original)
+        self.assertTrue((artifacts.CACHE_ROOT / 'fnm-download-v1.40.0.json').is_file())
 
     def test_platform_rejection_does_not_create_cache(self):
         with mock.patch.object(artifacts.platform, 'system', return_value='Windows'):

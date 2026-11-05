@@ -142,11 +142,15 @@ class MenuTests(unittest.TestCase):
 
     @staticmethod
     def form(vmid='', cores='', key='ssh-ed25519 AAAA demo', confirmation='n',
-             network='', address='', gateway='', nameserver='', expected_ip='', disk='', storage='', bridge='', apt_mirror=''):
+             network='', address='', gateway='', nameserver='', expected_ip='', disk='', storage='', bridge='', apt_mirror='',
+             policy='', management='192.168.50.1/32', lan_allow='', audit_choice='', vlan=''):
         fields = [vmid, '', storage, bridge, cores, '', disk, apt_mirror, 'paste', key, '', '', network]
         if network == 'static':
             fields.extend([address, gateway, nameserver])
-        fields.extend([expected_ip, '', '', confirmation, ''])
+        fields.extend([expected_ip, policy, management])
+        if network != 'static':
+            fields.extend(['192.168.50.1', '192.168.50.1', '192.168.50.1'])
+        fields.extend([lan_allow, audit_choice, vlan, '', '', confirmation, ''])
         return '\n'.join(fields) + '\n'
 
     def test_shell_syntax(self):
@@ -380,14 +384,40 @@ class MenuTests(unittest.TestCase):
         self.assertEqual(calls[0][calls[0].index('--disk') + 1], '32')
         self.assertIn('test-images', calls[0])
         self.assertIn('br-test', calls[0])
-        for option in ['--address', '--gateway', '--nameserver']:
+        for option in ['--address', '--gateway']:
             self.assertNotIn(option, calls[0])
+        self.assertIn('--nameserver',calls[0])
+        self.assertEqual(calls[0][calls[0].index('--network-policy')+1],'isolated')
+        self.assertNotIn('--connection-audit',calls[0])
 
     def test_agent_apply_is_plan_then_create_only(self):
         result = self.shell(self.agent_code('create'), self.form(confirmation='y'))
         calls = self.calls(result.stderr)
         self.assertEqual([x[:2] for x in calls], [['agent', 'plan'], ['agent', 'create']])
         self.assertEqual(calls[0][2:], calls[1][2:])
+
+    def test_new_workstation_network_policy_audit_and_whitelist_reach_plan_and_create(self):
+        result=self.shell(self.agent_code('create'),self.form(confirmation='y',policy='lan',audit_choice='y',
+            vlan='12',management='192.168.50.1/32 192.168.60.0/24',lan_allow='192.168.50.2/32,tcp,8006'))
+        for call in self.calls(result.stderr):
+            self.assertEqual(call[call.index('--network-policy')+1],'lan')
+            self.assertEqual(call.count('--management-cidr'),2)
+            self.assertEqual(call[call.index('--lan-allow')+1],'192.168.50.2/32,tcp,8006')
+            self.assertEqual(call[call.index('--vlan')+1],'12')
+            self.assertIn('--connection-audit',call)
+
+    def test_diagnostics_and_log_menus_only_route_readonly_commands(self):
+        code=self.source('components/the_agent_workstation.sh')+self.mock_cli()+'the_agent_workstation'
+        result=self.shell(code,'6\n219\n\n7\n219\ndriver\n\n11\n219\n\n0\n')
+        self.assertEqual(self.calls(result.stderr),[['agent','doctor','--vmid','219'],
+            ['agent','logs','--vmid','219','--job','driver'],['agent','network-status','--vmid','219']])
+
+    def test_software_and_gpu_switches_default_to_cancel(self):
+        code=self.source('components/the_agent_workstation.sh')+self.mock_cli()+'the_agent_workstation'
+        self.assertEqual(self.calls(self.shell(code,'8\n219\n\n9\n219\nn\n0\n').stderr),[])
+        result=self.shell(code,'8\n219\ny\n\n9\n219\ny\n\n0\n')
+        self.assertEqual(self.calls(result.stderr),[['agent','resume','--vmid','219','--gpu','none'],
+            ['agent','resume','--vmid','219','--gpu','auto']])
 
     def test_agent_apt_mirror_default_and_presets_reach_plan_and_apply(self):
         for action in ['create','rebuild']:

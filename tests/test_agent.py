@@ -26,7 +26,7 @@ PUBLIC='ssh-ed25519 '+wire(b'ssh-ed25519',bytes(range(32)))+' acceptance'
 
 
 def config(**changes):
-    value=dict(vmid=103,storage='ai-dev',bridge='vmbr0',ssh_key=PUBLIC,gpu='none')
+    value=dict(vmid=103,storage='ai-dev',bridge='vmbr0',ssh_key=PUBLIC,gpu='none',network_policy='legacy')
     value.update(changes);return agent.normalize(value)
 
 

@@ -132,8 +132,9 @@ def agent_record(data):
     show('显示模式', data.get('mode'))
     show('存储', config.get('storage', resources.get('storage')))
     show('网桥', config.get('bridge', resources.get('bridge')))
+    show('VLAN', config.get('vlan'))
     for key, label in [('cores', 'vCPU'), ('memory', '固定内存 MiB'), ('disk', '磁盘 GiB'),
-                       ('mac', 'MAC'), ('expected_ip', '期望 IPv4（仅核验）')]:
+                       ('mac', 'MAC'), ('expected_ip', '期望 IPv4')]:
         show(label, config.get(key))
     if config:
         mirror = config.get('apt_mirror', 'official')
@@ -144,6 +145,32 @@ def agent_record(data):
         show('网络', config.get('address') or 'DHCP')
         show('网关', config.get('gateway'))
         show('DNS', config.get('nameserver'))
+        policy=config.get('network_policy','legacy')
+        banner('【网络】'+{'isolated':'默认隔离内网，仅放行管理、DNS／DHCP与明确白名单。',
+                              'lan':'已显式允许主动访问内网。', 'legacy':'旧工作机网络保持原状。'}.get(policy,policy),33 if policy=='lan' else 32)
+        if policy!='legacy':
+            show('源地址绑定',config.get('expected_ip'));show('IPv6','宿主侧阻断')
+            show('SSH管理来源',', '.join(config.get('management_cidrs') or []))
+            show('内网放行', '; '.join(config.get('lan_allow') or []) or '无')
+            show('连接审计','开启，72小时' if config.get('connection_audit') else '关闭（默认）')
+    net=data.get('network') or {}
+    show('网络策略',net.get('policy'))
+    if net.get('first_boot'):show('首次开机网络','专属规则和启动检查验证完成前保持网卡断开')
+    if 'table_present' in net:
+        show('宿主规则表','存在' if net['table_present'] else '缺失，请检查；不代表隔离正常')
+        show('规则读回校验','通过' if net.get('rules_match') else '未通过，请检查')
+    show('规则加载后丢弃包数',net.get('drop_packets_since_rule_load'))
+    if data.get('network_pending'):
+        banner('【网络变更待恢复】检查该VM网卡断开状态，重新应用网络策略；不会自动放行。',33)
+    audit=data.get('audit') or {}
+    if audit:
+        show('审计采集状态','关闭' if not audit.get('enabled') else '运行' if audit.get('active') else '未运行')
+        show('审计流数量',audit.get('flow_count'))
+        show('审计最后观察',audit.get('last_observed_utc'))
+        for key,label in [('gap','审计采集缺口'),('coverage_gap','审计当前覆盖缺口')]:
+            gap=audit.get(key)
+            show(label,(str(gap.get('reason','unknown'))+' '+str(gap.get('observed_utc',''))) if isinstance(gap,dict) else gap)
+        show('连接审计范围','固定IPv4的TCP/UDP流元数据；不代表连接成功，不含被丢弃尝试明细')
     if config.get('ssh_key'):
         show('SSH 公钥指纹', fingerprint(config['ssh_key']))
     selected = data.get('selected_gpu')
@@ -195,6 +222,24 @@ def agent_record(data):
         show('驱动缓存大小', '%.1f MiB' % (cache['bytes'] / 1024**2))
     for key, label in [('error', '错误'), ('gpu_error', 'GPU 错误'), ('guest_stage', '客机安装目录')]:
         show(label, data.get(key))
+    if data.get('read_only'):
+        show('诊断','只读；不会安装、重启或操作浏览器')
+    labels={'ownership':'VM归属','services':'用户服务','listeners':'回环监听','manual_mode':'人工接管',
+            'diagnostics':'现有诊断','recorded_verification':'历史验收','network':'宿主规则','connection_audit':'连接审计'}
+    for key,value in (data.get('checks') or {}).items():
+        show('检查 '+labels.get(key,key),value.get('status','UNKNOWN') if isinstance(value,dict) else value)
+        if isinstance(value,dict):
+            show('  提示',value.get('error'))
+            for field,label in [('unexpected','异常服务'),('missing','缺少监听'),('non_loopback','非回环监听')]:
+                if value.get(field):show('  '+label,', '.join(str(item) for item in value[field]))
+            if key=='manual_mode' and 'active' in value:show('  当前控制','人工接管' if value['active'] else 'Codex')
+    for error in data.get('errors') or []:show('诊断提示',error)
+    if 'tail' in data:
+        show('日志',data.get('path'));show('日志总字节',data.get('bytes'))
+        print('【日志尾部】最多16 KiB；原始JSON可完整查看本次返回的尾部。')
+        for line in str(data['tail']).splitlines()[-120:]:print(text(line))
+    show('导出文件',data.get('path') if 'tail' not in data else None)
+    show('导出记录数',data.get('rows'))
 
 
 def summarize(data, kind, action, arguments, failed=False):

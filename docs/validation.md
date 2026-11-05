@@ -89,3 +89,18 @@ Cloud-init配置新增固定4 GiB swap，客机在桌面安装前验证文件权
 ## 2026-11-05：已删除VM的旧部署记录
 
 Windows全量233项检查中229项通过、4项按平台条件跳过；隔离Debian13全量233项中225项通过、8项按平台或依赖条件跳过。新增检查覆盖默认取消／明确确认、PVE VMID断言、QEMU／LXC／PID占用、记录漂移、准备或原子写入失败，以及缓存／锁文件／旧打包文件保留。Linux实际文件锁检查确认准备期间其他操作无法取得同一VMID锁，完成后锁文件inode保持不变。这里只验证命令替身与临时文件，没有在PVE执行真实清理或创建。
+
+## 2026-11-06：恢复、网络隔离、连接审计与原菜单保留
+
+- Windows与Debian各运行355项测试，无失败，各10项因平台／内核能力跳过。新增覆盖任务跨重启恢复、未知QGA结果不触发GPU回退、打包与下载发布中断、运行时版本切换、首次启网顺序、规则读回漂移、额外NIC／MAC／网桥／VLAN漂移、人工网络策略切换及精确清理。最后对只读诊断的NIC一致性补充复测10项，网络集成20项通过。
+- 审计23项测试含12个发布前后中断、18个删除前后中断收尾、旧配置与新源码半更新、精确临时文件恢复、现存摘要漂移拒绝、72小时过期与容量淘汰、关闭后继续过期清理、gap和心跳、只读导出及私有源码运行不生成字节码。普通状态查询不写资源，资源不完整明确显示unknown。
+- 06／07保留入口与资源，专项10项测试覆盖单接口精确修改／取消／漂移拒绝、旧备份与归档保留、复制或归档失败返回非零、还原双确认，以及pmxcfs不允许保存属性时仅复制配置内容。备份不含VM磁盘。其他菜单和附带ROM／源文件未移除。
+- `bash -n menu.sh index.sh components/*.sh`、Python编译、`git diff --check`通过；审计生成的systemd unit／timer通过`systemd-analyze verify`。
+
+原WSL内核未启用nft bridge family，相关实包测试准确跳过。另使用Debian13标准内核 `6.12.107+deb13-amd64` 启动一次性KVM，严格无网卡、无磁盘，内部独立网络命名空间生成所有测试流量：
+
+- 39条真实数据包断言全部通过：公网TCP/UDP、DNS、DHCP广播与0源地址、SSH请求及状态化回复、端口白名单；私网、宿主公网本地地址及公网地址型host route、伪造MAC／IP／ARP、IPv6、其他L2／嵌套VLAN阻断；模拟其他VM的IPv4／IPv6与相同目标连接保持可用；重复原子应用规则仍可连接。
+- 最新审计恢复补丁下，真实conntrack订阅／快照、TCP／UDP入站出站元数据、SQLite、其他VM过滤、JSON／CSV导出、心跳和gap、SIGTERM退出及订阅子进程回收通过。仅模拟systemd命令，未模拟conntrack、collector或SQLite。
+- 最终输出 `ONEPVE_NETWORK_39_EXIT=0`、`ONEPVE_AUDIT_KERNEL_EXIT=0`、`ONEPVE_ACCEPTANCE_EXIT=0`。开发环境日志为 `/var/tmp/onepve-netcheck/acceptance-20261106.txt`，SHA256 `a1521b9d676909f3c6f6884280cae5be46c2dbed77f390427f44780b9a2b3745`，测试机已正常关机。
+
+本轮未操作实际PVE、未创建或改动现有VM，也未重验真实Intel GPU硬件加速。新建默认策略、依赖、固定IPv4／单网卡限制、审计缺口及网络变更失败恢复见[网络与审计](network-security.md)；不把流记录当作连接成功或完整取证保证。

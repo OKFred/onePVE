@@ -4,6 +4,7 @@ import hashlib
 import json
 from pathlib import Path, PurePosixPath
 import sys
+from onepve_common import APT_MIRRORS
 
 
 def text(value):
@@ -136,6 +137,11 @@ def agent_record(data):
                        ('mac', 'MAC'), ('expected_ip', '期望 IPv4（仅核验）')]:
         show(label, config.get(key))
     if config:
+        mirror = config.get('apt_mirror', 'official')
+        label, primary, security = APT_MIRRORS.get(mirror, (mirror, '', ''))
+        show('客机 APT 源', label + ' (' + mirror + ')')
+        show('  软件包源', primary)
+        show('  安全更新源', security)
         show('网络', config.get('address') or 'DHCP')
         show('网关', config.get('gateway'))
         show('DNS', config.get('nameserver'))

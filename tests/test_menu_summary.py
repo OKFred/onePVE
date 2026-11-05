@@ -41,6 +41,19 @@ class MenuSummaryTests(unittest.TestCase):
                     code, output = self.summary(value, kind, action, args)
                     self.assertEqual(code, 1); self.assertIn('未确认', output)
 
+    def test_agent_summary_shows_mirror_name_and_package_security_urls(self):
+        for mirror,label,host in [('tuna','清华 TUNA','mirrors.tuna.tsinghua.edu.cn'),
+                                  ('ustc','中科大 USTC','mirrors.ustc.edu.cn')]:
+            with self.subTest(mirror=mirror):
+                code,output=self.summary({'phase':'PLANNED','config':{'apt_mirror':mirror}})
+                self.assertEqual(code,0)
+                self.assertIn('客机 APT 源: '+label+' ('+mirror+')',output)
+                self.assertIn('https://'+host+'/debian',output)
+                self.assertIn('https://'+host+'/debian-security',output)
+        code,output=self.summary({'phase':'BASE_READY','config':{'vmid':103}})
+        self.assertIn('Debian 官方 (official)',output)
+        self.assertIn('https://security.debian.org/debian-security',output)
+
     def test_gpu_inventory_shows_pf_vf_driver_and_occupancy(self):
         value = [dict(bdf='0000:00:02.1', vendor='0x8086', device='0x7d67', driver='vfio-pci',
                       physfn='0000:00:02.0', vfs=[], consumers=[{'kind':'device_fd','vmid':'103','pid':'42'}])]

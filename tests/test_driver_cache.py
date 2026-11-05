@@ -271,6 +271,7 @@ class DriverCacheTransportTests(unittest.TestCase):
     def test_completed_driver_for_old_kernel_gets_new_inputs_and_job(self):
         current = dict(SPEC, kernel='6.12.114+deb13-amd64')
         state = dict(vmid=103, phase='GUEST_DRIVER_RUNNING', guest_stage='/stage', guest_payload='/stage/payload',
+                     config={'apt_mirror': 'tuna'},
                      selected_gpu={'device': '0x7d67'}, driver_spec=SPEC, guest_arch=ARCH,
                      artifacts={'driver_sources': {SPEC['version']: '/source.tar.gz'}},
                      driver_cache_input='/stage/old-input.tar.gz', jobs={'driver': {'result': {'status': 'SUCCESS'}}})
@@ -284,6 +285,8 @@ class DriverCacheTransportTests(unittest.TestCase):
         self.assertEqual(state['driver_spec'], current)
         self.assertNotEqual(state['driver_cache_input'], '/stage/old-input.tar.gz')
         self.assertFalse(any(call.args[0] == '/stage/old-input.tar.gz' for call in q.write.call_args_list))
+        script = next(call.args[1] for call in q.write.call_args_list if call.args[0] == '/stage/prepare-driver.py')
+        self.assertIn(b'https://mirrors.tuna.tsinghua.edu.cn/debian-security', script)
         job.assert_called_once(); self.assertNotIn('driver', state['jobs'])
 
 

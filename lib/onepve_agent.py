@@ -26,7 +26,7 @@ import onepve_artifacts as artifacts
 import onepve_gpu as gpu
 import onepve_driver_cache as driver_cache
 from onepve_common import (APT_MIRRORS, STATE_ROOT, Qga, atomic_json, node_name, pve_get,
-                          progress, progress_session, repo_root, require_root, run, vm_config)
+                          progress, progress_enabled, progress_session, repo_root, require_root, run, vm_config)
 
 AGENT_STATE = STATE_ROOT / 'agent'
 VM_CONFIGS = Path('/etc/pve/qemu-server')
@@ -601,6 +601,55 @@ manifest=dict(MANIFEST,cache_dir=str(target/'cache'))
     _save(state,'PAYLOAD_READY',guest_payload=payload)
 
 
+def _job_log_tail(q, job):
+    """Read bounded progress metadata without executing a guest command."""
+    handle=q.call('guest-file-open',{'path':str(Path(job['path']).with_suffix('.log')),'mode':'rb'})
+    try:
+        size=q.call('guest-file-seek',{'handle':handle,'offset':0,'whence':'end'})['position']
+        need(type(size) is int and size>=0,'Invalid guest log size')
+        offset=max(0,size-16384)
+        q.call('guest-file-seek',{'handle':handle,'offset':offset,'whence':'set'})
+        data=q.call('guest-file-read',{'handle':handle,'count':size-offset}) if size else {}
+        text=base64.b64decode(data.get('buf-b64',''),validate=True)
+        need(len(text)<=16384,'Guest progress tail exceeds limit')
+        # Ignore the first partial line when the log was larger than the tail.
+        return size,text.split(b'\n',1)[-1] if offset else text
+    finally:
+        q.call('guest-file-close',{'handle':handle})
+
+
+def _job_log_progress(text):
+    detail,remaining='任务执行中（暂无可用进度采样）',None
+    for line in text.splitlines():
+        if line.startswith('[onePVE guest] '):
+            detail,remaining='执行客机系统配置',None
+            try:args=shlex.split(line[len('[onePVE guest] '):])
+            except ValueError:continue
+            if args and args[0]=='apt-get':
+                detail='APT 刷新索引' if 'update' in args else 'APT 准备软件包'
+        elif line.startswith('[onePVE phase] driver-build') or line.startswith('Building module'):
+            detail,remaining='准备／编译／安装显卡驱动（无可靠总工作量）',None
+        elif line.startswith('[onePVE phase] driver-verify'):
+            detail,remaining='校验显卡驱动',None
+        elif line.startswith(('Fetched ','Reading package lists','Download complete')):
+            detail,remaining='APT 下载阶段结束，正在读取索引或准备后续配置',None
+        elif line.startswith(('dlstatus:','pmstatus:')):
+            fields=line.split(':',3)
+            detail,remaining='APT 进度暂不可用',None
+            if len(fields)!=4:continue
+            try:percent=float(fields[2])
+            except ValueError:continue
+            if not 0<=percent<=100:continue
+            detail=('APT 软件包下载' if fields[0]=='dlstatus' else 'APT 解包／配置')+' %.1f%%'%percent
+            if fields[0]=='dlstatus' and percent<100:
+                estimate=re.search(r'\(((?:\d{1,6}\s*(?:d|h|min|m|s)\s*)+)remaining\)',fields[3])
+                if estimate:
+                    seconds=sum(int(n)*{'d':86400,'h':3600,'min':60,'m':60,'s':1}[unit]
+                                for n,unit in re.findall(r'(\d{1,6})\s*(d|h|min|m|s)',estimate[1]))
+                    if 0<seconds<172800:remaining=seconds
+    return detail,remaining
+
+
 def _job(state,name,command,timeout=7200,retry_failed=False):
     jobs=state.setdefault('jobs',{});job=jobs.get(name)
     if job and job.get('result',{}).get('status')=='SUCCESS':return job['result']
@@ -613,8 +662,9 @@ def _job(state,name,command,timeout=7200,retry_failed=False):
         directory='/var/lib/onepve-agent/jobs';result=directory+'/'+unit+'.json';script=state['guest_stage']+'/'+unit+'.py'
         job=dict(name=name,unit=unit,path=result,script=script,command=command)
         jobs[name]=job;state['job_history'].append(dict(job));_save(state)
-    progress('VM %s：%s' % (state['vmid'], PHASE_LABELS.get(state.get('phase'), '运行客机安装任务')),
-             '客机日志：' + str(Path(job['path']).with_suffix('.log')))
+    stage='VM %s：%s' % (state['vmid'], PHASE_LABELS.get(state.get('phase'), '运行客机安装任务'))
+    log_detail='客机日志：' + str(Path(job['path']).with_suffix('.log'))
+    progress(stage,log_detail)
     wrapper="""import subprocess,json,os
 from pathlib import Path
 p=Path(RESULT);p.parent.mkdir(parents=True,exist_ok=True,mode=0o700);os.umask(0o077)
@@ -643,9 +693,26 @@ with p.with_suffix('.log').open('ab',buffering=0) as log:
                                   '/usr/bin/python3',job['script']],30)
                 need(launch['returncode']==0,'Could not launch persistent guest job')
     deadline=time.monotonic()+timeout
+    next_progress=0;last_log_size=None
     while time.monotonic()<deadline:
         try:
-            with Qga(state['vmid']) as q:result=json.loads(q.read(job['path']))
+            with Qga(state['vmid']) as q:
+                result=json.loads(q.read(job['path']))
+                if result.get('status')=='RUNNING' and progress_enabled() and time.monotonic()>=next_progress:
+                    next_progress=time.monotonic()+10
+                    try:
+                        # Optional telemetry must not turn a slow guest into an installation failure.
+                        q.socket.settimeout(2)
+                        size,text=_job_log_tail(q,job)
+                        detail,remaining=_job_log_progress(text.decode('utf-8',errors='replace'))
+                        if last_log_size is not None and size>last_log_size:
+                            # Log chatter cannot refresh an older APT countdown.
+                            remaining=_job_log_progress(text[-(size-last_log_size):].decode('utf-8',errors='replace'))[1]
+                        else:remaining=None
+                        last_log_size=size
+                        progress(stage,detail+' | '+log_detail,remaining)
+                    except (OSError,RuntimeError,ValueError,TypeError,KeyError):
+                        progress(stage,'进度采样暂不可用 | '+log_detail)
         except (OSError,RuntimeError,json.JSONDecodeError):result={}
         if result.get('status') in {'SUCCESS','FAILED'}:
             job['result']=result;_save(state)
@@ -687,7 +754,7 @@ def _driver_script(state):
     _,primary,security=APT_MIRRORS[state['config'].get('apt_mirror','official')]
     apt_sources=(f'Types: deb\nURIs: {primary}\nSuites: trixie\nComponents: non-free-firmware\nSigned-By: /usr/share/keyrings/debian-archive-keyring.gpg\n\n'
                  f'Types: deb\nURIs: {security}\nSuites: trixie-security\nComponents: non-free-firmware\nSigned-By: /usr/share/keyrings/debian-archive-keyring.gpg\n')
-    return """import sys,subprocess,json,hashlib,tarfile,os
+    return """import sys,subprocess,json,hashlib,tarfile,os,shlex
 from pathlib import Path
 sys.path.insert(0,LIB)
 sys.path.insert(0,STAGE)
@@ -704,7 +771,12 @@ if source.exists():assert marker.is_file() and json.loads(marker.read_text())['a
 else:
  gpu._extract_source(archive,source);marker.write_text(json.dumps({'archive_sha256':spec['sha256']}));marker.chmod(0o600)
 environment=dict(os.environ,DEBIAN_FRONTEND='noninteractive')
-def run(*a):subprocess.run(a,check=True,env=environment)
+def run(*a):
+ args=list(a);env=environment
+ if args[0]=='apt-get':
+  args[1:1]=['-o','APT::Status-Fd=1'];env=dict(environment,LC_ALL='C')
+ print('[onePVE guest] '+shlex.join(args),flush=True)
+ subprocess.run(args,check=True,env=env)
 policy=subprocess.run(['apt-cache','policy','firmware-intel-graphics'],capture_output=True,text=True,check=True).stdout
 if not any(line.strip().startswith('Candidate:') and line.split(':',1)[1].strip() not in {'','(none)'} for line in policy.splitlines()):
  apt_source=Path('/etc/apt/sources.list.d/onepve-agent-firmware.sources')
@@ -714,7 +786,9 @@ if not any(line.strip().startswith('Candidate:') and line.split(':',1)[1].strip(
  else:
   with os.fdopen(os.open(apt_source,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o644),'w') as stream:stream.write(apt_body)
 run('apt-get','update');run('apt-get','install','-y','--no-install-recommends','dkms','build-essential','linux-headers-'+kernel,'firmware-intel-graphics')
+print('[onePVE phase] driver-build',flush=True)
 report=driver_cache.prepare(spec,source,Path(INCOMING),Path(STAGE)/'driver-cache-output.tar.gz')
+print('[onePVE phase] driver-verify',flush=True)
 Path('/var/lib/onepve-agent/driver-build.json').write_text(json.dumps({'spec':spec,'modules':report.pop('modules')},indent=2))
 for name in sorted(driver_cache.MODULES):
  assert subprocess.check_output(['modinfo','-k',kernel,'-F','version',name],text=True).strip()==spec['version']+'-sriov'

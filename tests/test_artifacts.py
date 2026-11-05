@@ -85,7 +85,7 @@ class ArtifactTests(unittest.TestCase):
              mock.patch.object(artifacts, 'progress') as report:
             artifacts.download_verified('https://example.test/item', path, hashlib.sha256(data).hexdigest())
         self.assertIn(mock.call('下载并校验文件：item', '预计大小：0.0 MiB (1024 字节)'), report.call_args_list)
-        self.assertIn(mock.call('下载校验完成：item', '文件大小：0.0 MiB (1024 字节)'), report.call_args_list)
+        self.assertIn(mock.call('下载校验完成：item', '文件大小：0.0 MiB (1024 字节)', remaining=0), report.call_args_list)
         with mock.patch.object(artifacts, '_open_url', side_effect=AssertionError('network')), \
              mock.patch.object(artifacts, 'progress') as report:
             artifacts.download_verified('https://example.test/item', path, hashlib.sha256(data).hexdigest())
@@ -97,7 +97,74 @@ class ArtifactTests(unittest.TestCase):
              mock.patch.object(artifacts, 'progress') as report:
             artifacts.download_verified('https://example.test/item', path, hashlib.sha256(data).hexdigest())
         self.assertIn(mock.call('下载并校验文件：item', '预计大小：未知'), report.call_args_list)
-        self.assertIn(mock.call('下载校验完成：item', '文件大小：0.0 MiB (5 字节)'), report.call_args_list)
+        self.assertIn(mock.call('下载校验完成：item', '文件大小：0.0 MiB (5 字节)', remaining=0), report.call_args_list)
+
+    def test_download_eta_uses_actual_bytes_and_throttles_reports(self):
+        block = b'x' * 1024**2
+        data = block * 4
+        response = io.BytesIO(data); response.headers = {'Content-Length': str(len(data))}
+        with mock.patch.object(artifacts, '_open_url', return_value=response), \
+             mock.patch.object(artifacts.time, 'monotonic', side_effect=[0, 1, 5, 6, 10, 11]), \
+             mock.patch.object(artifacts, 'progress') as report:
+            artifacts.download_verified('https://example.test/item', self.root/'item', hashlib.sha256(data).hexdigest())
+        samples = [call for call in report.call_args_list if call.args[0] == '下载文件：item']
+        self.assertEqual(len(samples), 3)
+        self.assertIn('50.0%', samples[0].args[1])
+        self.assertIn('409.6 KiB/s', samples[0].args[1])
+        self.assertEqual(samples[0].kwargs['remaining'], 5)
+        self.assertEqual(samples[-1].kwargs['remaining'], 0)
+        verify = next(i for i, call in enumerate(report.call_args_list) if call.args[0] == '校验下载文件：item')
+        self.assertFalse(report.call_args_list[verify].kwargs)
+        self.assertEqual(report.call_args_list[-1].kwargs, {'remaining': 0})
+
+    def test_unknown_length_and_bad_clock_never_invent_eta(self):
+        cases = [(None, [0, 5, 6]), (None, [5, 5, 5]), ('5', [5, 5, 5]),
+                 ('5', [5, 4, 3]), ('5', [0, float('nan'), float('nan')])]
+        for index, (length, clock) in enumerate(cases):
+            data = b'valid'; response = io.BytesIO(data); response.headers = {'Content-Length': length}
+            path = self.root/('item-' + str(index))
+            with self.subTest(length=length, clock=clock), mock.patch.object(artifacts, '_open_url', return_value=response), \
+                 mock.patch.object(artifacts.time, 'monotonic', side_effect=clock), \
+                 mock.patch.object(artifacts, 'progress') as report:
+                artifacts.download_verified('https://example.test/item', path, hashlib.sha256(data).hexdigest())
+            samples = [call for call in report.call_args_list if call.args[0].startswith('下载文件：')]
+            self.assertTrue(samples)
+            self.assertTrue(all(call.kwargs['remaining'] is None for call in samples))
+            self.assertIn('总大小：未知' if length is None else '速度：未知', samples[-1].args[1])
+            self.assertNotIn('nan', samples[-1].args[1])
+
+    def test_interrupted_transfer_clears_eta_and_removes_partial(self):
+        class BrokenTransfer(io.BytesIO):
+            headers = {'Content-Length': str(2 * 1024**2)}
+
+            def read(self, size):
+                if self.tell():
+                    raise OSError('connection lost')
+                return super().read(size)
+
+        response = BrokenTransfer(b'x' * 1024**2)
+        path = self.root/'item'
+        with mock.patch.object(artifacts, '_open_url', return_value=response), \
+             mock.patch.object(artifacts.time, 'monotonic', side_effect=[0, 5]), \
+             mock.patch.object(artifacts, 'progress') as report:
+            with self.assertRaisesRegex(OSError, 'connection lost'):
+                artifacts.download_verified('https://example.test/item', path, 'a' * 64)
+        sample = next(call for call in report.call_args_list if call.args[0] == '下载文件：item')
+        self.assertEqual(sample.kwargs['remaining'], 5)
+        self.assertEqual(report.call_args_list[-1].args[0], '下载或校验失败：item')
+        self.assertFalse(report.call_args_list[-1].kwargs)
+        self.assertFalse(path.exists()); self.assertFalse(list(self.root.glob('*.part-*')))
+
+    def test_failed_checksum_clears_download_estimate_without_success(self):
+        data = b'wrong'; response = io.BytesIO(data); response.headers = {'Content-Length': str(len(data))}
+        with mock.patch.object(artifacts, '_open_url', return_value=response), \
+             mock.patch.object(artifacts.time, 'monotonic', side_effect=[0, 5, 6]), \
+             mock.patch.object(artifacts, 'progress') as report:
+            with self.assertRaisesRegex(RuntimeError, 'checksum differs'):
+                artifacts.download_verified('https://example.test/item', self.root/'item', 'a'*64)
+        self.assertEqual(report.call_args_list[-1].args[0], '下载或校验失败：item')
+        self.assertFalse(report.call_args_list[-1].kwargs)
+        self.assertFalse(any(call.args[0].startswith('下载校验完成') for call in report.call_args_list))
 
     def test_existing_bad_cache_is_not_overwritten(self):
         path = self.root / 'item'; path.write_bytes(b'old evidence')

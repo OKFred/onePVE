@@ -2,6 +2,7 @@
 import base64
 import contextlib
 import json
+import math
 import os
 from pathlib import Path
 import socket
@@ -25,6 +26,8 @@ class _Progress:
         self.stream = stream
         self.started = self.stage_started = time.monotonic()
         self.stage = self.detail = ''
+        self.remaining = None
+        self.estimated_at = self.started
         self.lock = threading.Lock()
         self.stopped = threading.Event()
         self.thread = threading.Thread(target=self._heartbeat, daemon=True)
@@ -38,6 +41,14 @@ class _Progress:
         stage_elapsed = max(0, int(now - self.stage_started))
         message = '【进度】%s | 本次已用时 %02d:%02d | 本阶段 %02d:%02d' % (
             self.stage, elapsed // 60, elapsed % 60, stage_elapsed // 60, stage_elapsed % 60)
+        age = max(0, now - self.estimated_at)
+        estimate = '未知'
+        if self.remaining is not None and age < 30 and (self.remaining == 0 or age < self.remaining):
+            seconds = max(0, math.ceil(self.remaining - age))
+            minutes, seconds = divmod(seconds, 60)
+            estimate = ('约%02d:%02d:%02d' % (minutes // 60, minutes % 60, seconds)
+                        if minutes >= 60 else '约%02d:%02d' % (minutes, seconds))
+        message += ' | 当前环节预计剩余 ' + estimate
         if waiting:
             message += ' | 等待中'
         if self.detail:
@@ -47,13 +58,21 @@ class _Progress:
         except (OSError, ValueError):
             self.stopped.set()
 
-    def update(self, stage, detail=''):
+    def update(self, stage, detail='', remaining=None):
         with self.lock:
-            if (stage, detail) == (self.stage, self.detail):
+            try:
+                remaining = float(remaining) if type(remaining) in (int, float) else None
+                if remaining is not None and (not math.isfinite(remaining) or remaining < 0):
+                    remaining = None
+            except OverflowError:
+                remaining = None
+            now = time.monotonic()
+            self.estimated_at = now
+            if (stage, detail, remaining) == (self.stage, self.detail, self.remaining):
                 return
             if stage != self.stage:
-                self.stage_started = time.monotonic()
-            self.stage, self.detail = stage, detail
+                self.stage_started = now
+            self.stage, self.detail, self.remaining = stage, detail, remaining
             self._write()
 
     def _heartbeat(self):
@@ -86,9 +105,13 @@ def progress_session():
         _progress = None
 
 
-def progress(stage, detail=''):
+def progress_enabled():
+    return _progress is not None and not _progress.stopped.is_set()
+
+
+def progress(stage, detail='', remaining=None):
     if _progress is not None:
-        _progress.update(stage, detail)
+        _progress.update(stage, detail, remaining)
 
 
 def repo_root():

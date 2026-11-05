@@ -67,12 +67,13 @@ class MenuSummaryTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn('无备份删除并重建 VMID: 219', output)
 
-    def test_previous_record_summary_explains_pending_consent_and_completed_cleanup(self):
+    def test_previous_record_summary_shows_record_without_redundant_banner(self):
         code, output = self.summary({'status': 'PLAN_ONLY', 'previous_record': {
             'path': '/var/lib/onepve/agent/219/state.json', 'phase': 'READY_GPU'}}, action='plan')
         self.assertEqual(code, 0)
-        for expected in ['旧记录待确认', '/var/lib/onepve/agent/219/state.json', 'READY_GPU', '缓存保留']:
+        for expected in ['/var/lib/onepve/agent/219/state.json', 'READY_GPU']:
             self.assertIn(expected, output)
+        self.assertNotIn('旧记录待确认', output)
         code, output = self.summary({'phase': 'READY_SOFTWARE', 'previous_record_cleared': {'phase': 'READY_GPU'}})
         self.assertEqual(code, 0)
         self.assertIn('旧记录清理: 已确认并完成', output)

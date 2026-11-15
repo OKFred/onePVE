@@ -87,3 +87,7 @@ python3 onepve.py agent status
 ## 其他原有菜单
 
 01更换源、02基础工具、04退出集群、05 SWAP、06 DHCP、07旧版配置备份还原、09说明仍保留。它们只有明确选择后才执行。**07只处理配置文件，不是 VM 磁盘／账号备份，也不是新工作机或显卡流程的回滚实现。** 附带的第三方 `pve_source` 亦不参与新流程。
+
+### 附带三方pve_source，也挺好用
+
+`cd $HOME/onePVE && chmod +x pve_source && ./pve_source`
